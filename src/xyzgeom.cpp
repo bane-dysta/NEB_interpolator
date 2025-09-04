@@ -9,6 +9,8 @@
 #include <set>
 #include <numeric>
 #include <cstring>
+#include <cstdlib>
+#include "neb_interpolator.h"
 
 struct Atom {
     std::string element;
@@ -158,6 +160,118 @@ public:
                      << std::setw(12) << atom.y
                      << std::setw(12) << atom.z << std::endl;
         }
+    }
+    
+    // Function -1: Print current structure to screen
+    void printCurrentStructure() {
+        printXYZ();
+    }
+    
+    // Function 13: Align with second XYZ file using calc_rmsd_xyz
+    void alignWithSecondXYZ() {
+        std::cout << "Enter reference XYZ filename to align with: ";
+        std::string refFile;
+        std::getline(std::cin, refFile);
+        
+        // Check if reference file exists
+        std::ifstream check(refFile);
+        if (!check.is_open()) {
+            std::cerr << "Error: Cannot open reference file " << refFile << std::endl;
+            return;
+        }
+        check.close();
+        
+        // Save current structure to temp file
+        std::string tempFile = "temp_mobile.xyz";
+        saveXYZ(tempFile);
+        
+        // Call calc_rmsd_xyz program
+        std::string command = "./calc_rmsd_xyz " + refFile + " " + tempFile;
+        std::cout << "Running alignment: " << command << std::endl;
+        
+        int result = system(command.c_str());
+        
+        if (result != 0) {
+            std::cerr << "Error: Alignment failed with exit code " << result << std::endl;
+            system(("rm -f " + tempFile).c_str());
+            return;
+        }
+        
+        // Load aligned structure back into memory
+        std::string alignedFile = "temp_mobile_new.xyz";
+        if (!loadXYZ(alignedFile)) {
+            std::cerr << "Error: Cannot load aligned structure" << std::endl;
+            system(("rm -f " + tempFile).c_str());
+            return;
+        }
+        
+        std::cout << "Structure aligned successfully and loaded into memory." << std::endl;
+        
+        // Clean up temp files
+        system(("rm -f " + tempFile).c_str());
+        system(("rm -f " + alignedFile).c_str());
+    }
+    
+    // Function 14: NEB interpolation with second XYZ file
+    void performNEBWithSecondXYZ() {
+        std::cout << "Enter final XYZ filename for NEB interpolation: ";
+        std::string finalFile;
+        std::getline(std::cin, finalFile);
+        
+        // Check if final file exists
+        std::ifstream check(finalFile);
+        if (!check.is_open()) {
+            std::cerr << "Error: Cannot open final file " << finalFile << std::endl;
+            return;
+        }
+        check.close();
+        
+        std::cout << "Enter number of intermediate images (default 5): ";
+        std::string input;
+        std::getline(std::cin, input);
+        int numImages = input.empty() ? 5 : std::stoi(input);
+        
+        std::cout << "Use NEB (n) or LIIC (l) method? (default n): ";
+        std::getline(std::cin, input);
+        bool useNEB = (input.empty() || input == "n" || input == "N");
+        
+        std::cout << "Enter output prefix (default: neb_): ";
+        std::string prefix;
+        std::getline(std::cin, prefix);
+        if (prefix.empty()) prefix = "neb_";
+        
+        // Create NEB interpolator
+        SimpleNEBInterpolator interpolator(numImages);
+        
+        // Convert current atoms to NEB format
+        std::vector<NEBAtom> nebAtoms;
+        for (const auto& atom : atoms) {
+            nebAtoms.push_back(NEBAtom(atom.element, atom.x, atom.y, atom.z));
+        }
+        
+        // Set initial structure from memory
+        interpolator.setInitialFromMemory(nebAtoms);
+        
+        // Set final structure from file
+        if (!interpolator.setFinalFromFile(finalFile)) {
+            std::cerr << "Error: Failed to set up NEB interpolation" << std::endl;
+            return;
+        }
+        
+        // Perform interpolation
+        if (useNEB) {
+            interpolator.performNEB();
+        } else {
+            interpolator.performLIIC();
+        }
+        
+        // Write results
+        if (!interpolator.writeResults(prefix)) {
+            std::cerr << "Error: Failed to write NEB results" << std::endl;
+            return;
+        }
+        
+        std::cout << "NEB interpolation completed successfully!" << std::endl;
     }
     
     // Function 1: Calculate distance and vector between 2 atoms
@@ -600,7 +714,8 @@ public:
         std::cout << "Current file: " << currentFile << std::endl;
         std::cout << "Atoms loaded: " << atoms.size() << std::endl;
         std::cout << "Current units: " << (useBohr ? "Bohr" : "Angstrom") << std::endl;
-        std::cout << "\n1.  Calculate distance and vector between 2 atoms" << std::endl;
+        std::cout << "\n-1. Print current structure to screen" << std::endl;
+        std::cout << "1.  Calculate distance and vector between 2 atoms" << std::endl;
         std::cout << "2.  Swap two atoms" << std::endl;
         std::cout << "3.  Calculate bond angle and plane normal" << std::endl;
         std::cout << "4.  Calculate angle between two planes" << std::endl;
@@ -612,6 +727,8 @@ public:
         std::cout << "10. Export current structure to XYZ" << std::endl;
         std::cout << "11. Load new XYZ file" << std::endl;
         std::cout << "12. Toggle units (Bohr/Angstrom)" << std::endl;
+        std::cout << "13. Align with second XYZ file (RMSD)" << std::endl;
+        std::cout << "14. NEB interpolation with second XYZ file" << std::endl;
         std::cout << "0.  Exit" << std::endl;
         std::cout << "\nEnter choice: ";
     }
@@ -657,6 +774,8 @@ public:
                 
                 printXYZ();
             }
+        } else if (operation == "--print") {
+            printXYZ();
         }
     }
     
@@ -674,6 +793,7 @@ public:
             }
             
             switch (choice) {
+                case -1: printCurrentStructure(); break;
                 case 1: calculateDistanceVector(); break;
                 case 2: swapAtoms(); break;
                 case 3: calculateBondAngle(); break;
@@ -686,6 +806,8 @@ public:
                 case 10: exportCurrentStructure(); break;
                 case 11: loadNewFile(); break;
                 case 12: toggleUnits(); break;
+                case 13: alignWithSecondXYZ(); break;
+                case 14: performNEBWithSecondXYZ(); break;
                 case 0:
                     std::cout << "Exiting..." << std::endl;
                     return;
@@ -704,6 +826,7 @@ int main(int argc, char* argv[]) {
         std::cout << "\nOptions for command-line processing:" << std::endl;
         std::cout << "  --swap <indices>    Swap two atoms and output new XYZ" << std::endl;
         std::cout << "  --mirror <indices>  Mirror through plane defined by 3 atoms" << std::endl;
+        std::cout << "  --print             Print current structure to screen" << std::endl;
         std::cout << "\nExample: " << argv[0] << " molecule.xyz --swap 1,3" << std::endl;
         std::cout << "\nIf no options provided, enters interactive mode." << std::endl;
         return 1;
