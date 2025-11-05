@@ -48,14 +48,14 @@ private:
                 int start = std::stoi(token.substr(0, dashPos));
                 int end = std::stoi(token.substr(dashPos + 1));
                 for (int i = start; i <= end; i++) {
-                    if (i > 0 && i <= atoms.size()) {
+                    if (i > 0 && static_cast<size_t>(i) <= atoms.size()) {
                         indices.insert(i - 1); // Convert to 0-based
                     }
                 }
             } else {
                 // Single number
                 int idx = std::stoi(token);
-                if (idx > 0 && idx <= atoms.size()) {
+                if (idx > 0 && static_cast<size_t>(idx) <= atoms.size()) {
                     indices.insert(idx - 1); // Convert to 0-based
                 }
             }
@@ -193,7 +193,8 @@ public:
         
         if (result != 0) {
             std::cerr << "Error: Alignment failed with exit code " << result << std::endl;
-            system(("rm -f " + tempFile).c_str());
+            int ret = system(("rm -f " + tempFile).c_str());
+            (void)ret;
             return;
         }
         
@@ -201,15 +202,18 @@ public:
         std::string alignedFile = "temp_mobile_new.xyz";
         if (!loadXYZ(alignedFile)) {
             std::cerr << "Error: Cannot load aligned structure" << std::endl;
-            system(("rm -f " + tempFile).c_str());
+            int ret = system(("rm -f " + tempFile).c_str());
+            (void)ret;
             return;
         }
         
         std::cout << "Structure aligned successfully and loaded into memory." << std::endl;
         
         // Clean up temp files
-        system(("rm -f " + tempFile).c_str());
-        system(("rm -f " + alignedFile).c_str());
+        int ret1 = system(("rm -f " + tempFile).c_str());
+        int ret2 = system(("rm -f " + alignedFile).c_str());
+        (void)ret1;
+        (void)ret2;
     }
     
     // Function 14: NEB interpolation with second XYZ file
@@ -604,8 +608,8 @@ public:
         }
         
         std::set<int> nearbyAtoms;
-        for (int i = 0; i < atoms.size(); i++) {
-            if (i != centerIdx) {
+        for (size_t i = 0; i < atoms.size(); i++) {
+            if (static_cast<int>(i) != centerIdx) {
                 double dist = std::sqrt(
                     std::pow(atoms[i].x - atoms[centerIdx].x, 2) +
                     std::pow(atoms[i].y - atoms[centerIdx].y, 2) +
@@ -613,7 +617,7 @@ public:
                 );
                 
                 if (dist <= radius) {
-                    nearbyAtoms.insert(i);
+                    nearbyAtoms.insert(static_cast<int>(i));
                 }
             }
         }

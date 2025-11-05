@@ -171,7 +171,8 @@ public:
         
         // 删除临时文件
         std::string remove_command = "rm " + aligned_file;
-        system(remove_command.c_str());
+        int ret = system(remove_command.c_str());
+        (void)ret;
         
         return true;
     }
@@ -262,7 +263,8 @@ public:
             }
             
             // 清理临时文件
-            system(("rm -f " + temp_final).c_str());
+            int ret = system(("rm -f " + temp_final).c_str());
+            (void)ret;
         }
         
         return true;
