@@ -210,6 +210,63 @@ make usage     # 显示使用信息
 - `--dm-max-step S`: 每次迭代最大笛卡尔位移（默认：0.20 Å）
 - `--no-dm-fallback`: 禁用DM回退（IIC失败时直接回退到LIIC）
 
+**外部引擎模式（External engine）**（用于 `-m neb` 或 `-m neb-iic`）：
+
+当你希望每个NEB cycle 调用外部程序（量化化学/机器学习势能等）来计算梯度/力时，使用外部引擎模式。
+
+- `--engine-cmd CMD`: 启用外部引擎并在每个cycle运行CMD。
+  - 若 CMD 包含占位符 `{in}`/`{out}`/`{cycle}`，会自动替换。
+  - 若不包含占位符，程序会在命令末尾追加：`<infile> <outfile>`。
+- `--engine-in FILE`: 引擎输入文件名（默认：`neb_engine_in.dat`）
+- `--engine-out FILE`: 引擎输出文件名（默认：`neb_engine_out.dat`）
+- `--engine-units U`: 写入文件头的单位标签（默认：`Angstrom`；也可设为 `AU`）
+- `--engine-vector TYPE`: 引擎输出向量类型：`gradient` 或 `force`（默认：`gradient`）
+- `--engine-spring K`: 外部引擎NEB的弹簧常数（默认：1.0）
+- `--engine-every N`: 每N个cycle调用一次引擎（默认：1，即每cycle）
+- `--engine-keep-files`: 保留每个cycle的I/O文件（文件名会加 `_cycle####` 后缀）
+
+**外部引擎I/O文件格式**（与扩展XYZ类似，按image分块）：
+
+1) 程序写给引擎的输入（`type=xyz`）：
+
+```text
+3
+image=1 units=AU type=xyz cycle=0
+O   0.00000000  0.00000000  0.00000000
+H   0.75860200  0.00000000  0.50428400
+H   0.75860200  0.00000000 -0.50428400
+...
+```
+
+2) 引擎返回给程序的输出（`type=gradient` 或 `type=force`）：
+
+```text
+3
+image=1 units=AU type=gradient
+O   0.01  -0.02  0.00
+H  -0.01   0.01  0.00
+H   0.00   0.01  0.00
+...
+```
+
+> 注意：若 `--engine-vector gradient`，程序会将梯度取负号作为力；若 `--engine-vector force` 则直接当作力使用。
+
+**引擎可用环境变量**（方便脚本读取，无需解析命令行参数）：
+- `NEB_ENGINE_IN`：输入文件路径
+- `NEB_ENGINE_OUT`：输出文件路径
+- `NEB_CYCLE`：当前cycle编号
+- `NEB_NIMAGES`：中间图像数
+- `NEB_NATOMS`：原子数
+
+**示例**：
+
+```bash
+./bin/neb_interpolator -m neb -n 8 \
+  --engine-cmd "python engine.py {in} {out}" \
+  --engine-units AU \
+  initial.xyz final.xyz
+```
+
 #### 方法选择建议
 
 - **LIIC** (`-m liic`): 快速简单，适合简单体系或快速预览
