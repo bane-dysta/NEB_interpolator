@@ -214,7 +214,7 @@ subroutine read_natom_from_xyz(xyzname, natom)
  integer :: fid
  integer, parameter :: iout = 6
  integer, intent(out) :: natom
- character(len=240) :: buf
+! character(len=240) :: buf
  character(len=240), intent(in) :: xyzname
 
  open(newunit=fid,file=trim(xyzname),status='old',position='rewind')

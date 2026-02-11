@@ -8,8 +8,55 @@
 #include <iomanip>
 #include <cstring>
 #include <cstdlib>
+#include <cstdio>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <limits.h>
+
+#include "internal_ic.h"
+
+// 查找 calc_rmsd_xyz 可执行文件的路径
+std::string findCalcRMSDExecutable(const std::string& default_path = "./calc_rmsd_xyz") {
+    // 1. 首先检查是否在 PATH 中
+    std::string command = "which calc_rmsd_xyz 2>/dev/null";
+    FILE* pipe = popen(command.c_str(), "r");
+    if (pipe != nullptr) {
+        char buffer[PATH_MAX];
+        if (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
+            pclose(pipe);
+            std::string path(buffer);
+            // 移除末尾的换行符
+            if (!path.empty() && path.back() == '\n') {
+                path.pop_back();
+            }
+            if (!path.empty()) {
+                return path;
+            }
+        } else {
+            pclose(pipe);
+        }
+    }
+    
+    // 2. 检查 neb_interpolator 所在目录
+    char exe_path[PATH_MAX];
+    ssize_t len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
+    if (len != -1) {
+        exe_path[len] = '\0';
+        std::string exe_dir(exe_path);
+        size_t last_slash = exe_dir.find_last_of('/');
+        if (last_slash != std::string::npos) {
+            exe_dir = exe_dir.substr(0, last_slash + 1);
+            std::string candidate = exe_dir + "calc_rmsd_xyz";
+            // 检查文件是否存在且可执行
+            if (access(candidate.c_str(), X_OK) == 0) {
+                return candidate;
+            }
+        }
+    }
+    
+    // 3. 如果都找不到，返回默认路径
+    return default_path;
+}
 
 struct Atom {
     std::string symbol;
@@ -171,7 +218,8 @@ public:
         
         // 删除临时文件
         std::string remove_command = "rm " + aligned_file;
-        system(remove_command.c_str());
+        int ret = system(remove_command.c_str());
+        (void)ret;
         
         return true;
     }
@@ -191,7 +239,12 @@ private:
     int max_iterations;
     bool use_alignment;
     FortranRMSDAligner aligner;
-    
+
+    // IIC / DM interpolation options (dependency-free, GSM-inspired)
+    ICInterp::IICOptions iic_options;
+    ICInterp::DMOptions dm_options;
+    bool enable_dm_fallback;
+
     static double distance(const Atom& a1, const Atom& a2) {
         double dx = a1.x - a2.x;
         double dy = a1.y - a2.y;
@@ -216,7 +269,7 @@ public:
     NEBInterpolator(int num_img = 5, double step = 0.0001, double conv_thresh = 0.01, 
                    int max_iter = 10000, bool align = true, const std::string& rmsd_exec = "./calc_rmsd_xyz") 
         : num_images(num_img), step_init(step), convergence_threshold(conv_thresh), 
-          max_iterations(max_iter), use_alignment(align), aligner(rmsd_exec) {}
+          max_iterations(max_iter), use_alignment(align), aligner(rmsd_exec), enable_dm_fallback(true) {}
     
     bool setStructures(const std::string& initial_file, const std::string& final_file) {
         if (!initial.readXYZ(initial_file)) return false;
@@ -262,7 +315,8 @@ public:
             }
             
             // 清理临时文件
-            system(("rm -f " + temp_final).c_str());
+            int ret = system(("rm -f " + temp_final).c_str());
+            (void)ret;
         }
         
         return true;
@@ -288,11 +342,134 @@ public:
             }
         }
     }
-    
-    void performNEB() {
+
+
+    // GSM-inspired internal-coordinate interpolation (IIC) with optional DM fallback.
+    // Returns true if IIC succeeded (or DM fallback succeeded). If both fail, falls back to LIIC and returns false.
+    bool performIIC() {
+        std::cout << "  Initializing intermediate images using internal-coordinate interpolation (IIC)..." << std::endl;
+
+        const size_t n = initial.size();
+        std::vector<std::string> symbols(n);
+        std::vector<double> x0(3*n, 0.0), x1(3*n, 0.0);
+
+        for (size_t i = 0; i < n; ++i) {
+            symbols[i] = initial.atoms[i].symbol;
+            x0[3*i+0] = initial.atoms[i].x;
+            x0[3*i+1] = initial.atoms[i].y;
+            x0[3*i+2] = initial.atoms[i].z;
+
+            x1[3*i+0] = final.atoms[i].x;
+            x1[3*i+1] = final.atoms[i].y;
+            x1[3*i+2] = final.atoms[i].z;
+        }
+
+        std::vector<std::vector<double>> imgs_xyz;
+        std::string err;
+        bool ok = ICInterp::interpolate_iic(symbols, x0, x1, num_images, imgs_xyz, iic_options, &err);
+
+        if (!ok) {
+            std::cerr << "  IIC failed: " << err << std::endl;
+
+            if (enable_dm_fallback) {
+                std::cout << "  Falling back to distance-matrix interpolation (DM)..." << std::endl;
+                bool ok_dm = ICInterp::interpolate_dm(symbols, x0, x1, num_images, imgs_xyz, dm_options, &err);
+                if (!ok_dm) {
+                    std::cerr << "  DM fallback failed: " << err << std::endl;
+                    std::cout << "  Falling back to Cartesian LIIC..." << std::endl;
+                    performLIIC();
+                    return false;
+                }
+                // Fill images from DM result
+                images.clear();
+                images.resize(num_images);
+                for (int img = 0; img < num_images; ++img) {
+                    images[img].atoms.resize(n);
+                    images[img].comment = "DM (fallback) intermediate image " + std::to_string(img + 1);
+                    for (size_t i = 0; i < n; ++i) {
+                        images[img].atoms[i].symbol = symbols[i];
+                        images[img].atoms[i].x = imgs_xyz[img][3*i+0];
+                        images[img].atoms[i].y = imgs_xyz[img][3*i+1];
+                        images[img].atoms[i].z = imgs_xyz[img][3*i+2];
+                    }
+                }
+                return true;
+            } else {
+                std::cout << "  DM fallback disabled. Falling back to Cartesian LIIC..." << std::endl;
+                performLIIC();
+                return false;
+            }
+        }
+
+        // Fill images from IIC result
+        images.clear();
+        images.resize(num_images);
+        for (int img = 0; img < num_images; ++img) {
+            images[img].atoms.resize(n);
+            images[img].comment = "IIC intermediate image " + std::to_string(img + 1);
+            for (size_t i = 0; i < n; ++i) {
+                images[img].atoms[i].symbol = symbols[i];
+                images[img].atoms[i].x = imgs_xyz[img][3*i+0];
+                images[img].atoms[i].y = imgs_xyz[img][3*i+1];
+                images[img].atoms[i].z = imgs_xyz[img][3*i+2];
+            }
+        }
+        return true;
+    }
+
+    // Distance-matrix interpolation (DM). Returns true if succeeded, else falls back to LIIC and returns false.
+    bool performDM() {
+        std::cout << "  Initializing intermediate images using distance-matrix interpolation (DM)..." << std::endl;
+
+        const size_t n = initial.size();
+        std::vector<std::string> symbols(n);
+        std::vector<double> x0(3*n, 0.0), x1(3*n, 0.0);
+
+        for (size_t i = 0; i < n; ++i) {
+            symbols[i] = initial.atoms[i].symbol;
+            x0[3*i+0] = initial.atoms[i].x;
+            x0[3*i+1] = initial.atoms[i].y;
+            x0[3*i+2] = initial.atoms[i].z;
+
+            x1[3*i+0] = final.atoms[i].x;
+            x1[3*i+1] = final.atoms[i].y;
+            x1[3*i+2] = final.atoms[i].z;
+        }
+
+        std::vector<std::vector<double>> imgs_xyz;
+        std::string err;
+        bool ok = ICInterp::interpolate_dm(symbols, x0, x1, num_images, imgs_xyz, dm_options, &err);
+
+        if (!ok) {
+            std::cerr << "  DM failed: " << err << std::endl;
+            std::cout << "  Falling back to Cartesian LIIC..." << std::endl;
+            performLIIC();
+            return false;
+        }
+
+        images.clear();
+        images.resize(num_images);
+        for (int img = 0; img < num_images; ++img) {
+            images[img].atoms.resize(n);
+            images[img].comment = "DM intermediate image " + std::to_string(img + 1);
+            for (size_t i = 0; i < n; ++i) {
+                images[img].atoms[i].symbol = symbols[i];
+                images[img].atoms[i].x = imgs_xyz[img][3*i+0];
+                images[img].atoms[i].y = imgs_xyz[img][3*i+1];
+                images[img].atoms[i].z = imgs_xyz[img][3*i+2];
+            }
+        }
+        return true;
+    }
+
+    void performNEB(bool init_with_iic = false) {
         std::cout << "Performing Nudged Elastic Band (NEB) interpolation..." << std::endl;
         
-        performLIIC();  // 从LIIC开始
+        if (init_with_iic) {
+            performIIC();
+        } else {
+            performLIIC();
+        }
         
         double spring_constant = 1.0;
         
@@ -505,6 +682,10 @@ private:
     }
 
 public:
+    void setIICOptions(const ICInterp::IICOptions& opt) { iic_options = opt; }
+    void setDMOptions(const ICInterp::DMOptions& opt) { dm_options = opt; }
+    void setDMFallback(bool enable) { enable_dm_fallback = enable; }
+
     void setParameters(int num_img, double step, double conv_thresh, int max_iter) {
         num_images = num_img;
         step_init = step;
@@ -516,39 +697,59 @@ public:
 void printUsage(const char* program_name) {
     std::cout << "Usage: " << program_name << " [options] <initial.xyz> <final.xyz>\n"
               << "\nOptions:\n"
-              << "  -n, --nimages NUM      Number of intermediate images (default: 5)\n"
-              << "  -m, --method METHOD    Interpolation method: liic or neb (default: neb)\n"
-              << "  -p, --prefix PREFIX    Output filename prefix (default: empty)\n"
-              << "  -o, --output MODE      Output mode: separate or multiframe (default: separate)\n"
-              << "  -s, --step STEP        Initial step size for NEB optimization (default: 0.0001)\n"
-              << "  -c, --conv THRESHOLD   Convergence threshold (default: 0.01)\n"
-              << "  -i, --maxiter ITER     Maximum iterations for NEB (default: 10000)\n"
-              << "  -a, --align            Enable structure alignment using Fortran RMSD (default: enabled)\n"
-              << "  --no-align             Disable structure alignment\n"
-              << "  -r, --rmsd-exec PATH   Path to Fortran RMSD executable (default: ./calc_rmsd_xyz)\n"
-              << "  -h, --help             Show this help message\n"
+              << "  -n, --nimages NUM        Number of intermediate images (default: 5)\n"
+              << "  -m, --method METHOD      Method: liic | iic | dm | neb | neb-iic (default: neb)\n"
+              << "  -p, --prefix PREFIX      Output filename prefix (default: empty)\n"
+              << "  -o, --output MODE        Output mode: separate or multiframe (default: separate)\n"
+              << "  -s, --step STEP          Initial step size for NEB optimization (default: 0.0001)\n"
+              << "  -c, --conv THRESHOLD     Convergence threshold (default: 0.01)\n"
+              << "  -i, --maxiter ITER       Maximum iterations for NEB (default: 10000)\n"
+              << "  -a, --align              Enable structure alignment using Fortran RMSD (default: enabled)\n"
+              << "  --no-align               Disable structure alignment\n"
+              << "  -r, --rmsd-exec PATH     Path to Fortran RMSD executable (default: ./calc_rmsd_xyz)\n"
+              << "  -h, --help               Show this help message\n"
+              << "\nIIC options (used by -m iic or -m neb-iic):\n"
+              << "  --bond-factor F          Bond cutoff factor (default: 1.25)\n"
+              << "  --fd-step H              Finite-difference step for B matrix in IIC (default: 1e-4)\n"
+              << "  --ev-thresh T            Eigenvalue threshold for DLC selection (default: 1e-3)\n"
+              << "  --iic-maxiter N          Max back-transform iterations (default: 50)\n"
+              << "  --iic-tol T              RMS primitive residual tolerance (default: 1e-4)\n"
+              << "  --iic-damp D             Damping added to eigenvalues (default: 1e-8)\n"
+              << "  --iic-max-step S         Max cartesian step per iteration (default: 0.20)\n"
+              << "\nDM options (used as fallback when IIC fails, or -m dm):\n"
+              << "  --dm-maxiter N           Max DM iterations (default: 800)\n"
+              << "  --dm-step S              DM gradient step size (default: 5e-3)\n"
+              << "  --dm-tol T               RMS distance-error tolerance (default: 1e-3)\n"
+              << "  --dm-max-step S          Max cartesian step per iteration (default: 0.20)\n"
+              << "  --no-dm-fallback         Disable DM fallback (fallback directly to LIIC)\n"
               << "\nOutput modes:\n"
               << "  separate     Generate separate XYZ files (00.xyz, 01.xyz, ...)\n"
               << "  multiframe   Generate single trajectory.xyz with all frames\n"
               << "\nAlignment:\n"
-              << "  This program uses a Fortran RMSD calculator for precise structure alignment.\n"
+              << "  This program can use a Fortran RMSD calculator for precise structure alignment.\n"
               << "  Make sure the calc_rmsd_xyz executable is compiled and accessible.\n"
               << "\nExamples:\n"
               << "  " << program_name << " -n 10 -m neb -p reaction_ initial.xyz final.xyz\n"
-              << "  " << program_name << " --no-align -o multiframe -n 5 -m liic initial.xyz final.xyz\n"
-              << "  " << program_name << " -r /path/to/calc_rmsd_xyz -a initial.xyz final.xyz\n";
+              << "  " << program_name << " -n 10 -m neb-iic --bond-factor 1.2 --fd-step 1e-4 --ev-thresh 1e-3 initial.xyz final.xyz\n"
+              << "  " << program_name << " --no-align -o multiframe -n 5 -m iic initial.xyz final.xyz\n"
+              << "  " << program_name << " -m dm -n 8 initial.xyz final.xyz\n";
 }
 
 int main(int argc, char* argv[]) {
     std::string initial_file, final_file, prefix = "";
     std::string method = "neb";
     std::string output_mode = "separate";
-    std::string rmsd_executable = "./calc_rmsd_xyz";
+    std::string rmsd_executable = findCalcRMSDExecutable();
     int num_images = 5;
     double step_size = 0.0001;
     double conv_threshold = 0.01;
     int max_iterations = 10000;
     bool use_alignment = true;
+
+    // IIC/DM options (dependency-free)
+    ICInterp::IICOptions iic_opt;
+    ICInterp::DMOptions dm_opt;
+    bool dm_fallback = true;
     
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
@@ -562,8 +763,8 @@ int main(int argc, char* argv[]) {
             }
         } else if ((strcmp(argv[i], "-m") == 0 || strcmp(argv[i], "--method") == 0) && i + 1 < argc) {
             method = argv[++i];
-            if (method != "liic" && method != "neb") {
-                std::cerr << "Error: Method must be 'liic' or 'neb'" << std::endl;
+            if (method != "liic" && method != "iic" && method != "dm" && method != "neb" && method != "neb-iic") {
+                std::cerr << "Error: Method must be \'liic\', \'iic\', \'dm\', \'neb\', or \'neb-iic\'" << std::endl;
                 return 1;
             }
         } else if ((strcmp(argv[i], "-p") == 0 || strcmp(argv[i], "--prefix") == 0) && i + 1 < argc) {
@@ -598,6 +799,74 @@ int main(int argc, char* argv[]) {
             use_alignment = false;
         } else if ((strcmp(argv[i], "-r") == 0 || strcmp(argv[i], "--rmsd-exec") == 0) && i + 1 < argc) {
             rmsd_executable = argv[++i];
+        } else if (strcmp(argv[i], "--bond-factor") == 0 && i + 1 < argc) {
+            iic_opt.bond_factor = std::atof(argv[++i]);
+            if (iic_opt.bond_factor <= 0.0) {
+                std::cerr << "Error: --bond-factor must be positive" << std::endl;
+                return 1;
+            }
+        } else if (strcmp(argv[i], "--fd-step") == 0 && i + 1 < argc) {
+            iic_opt.fd_step = std::atof(argv[++i]);
+            if (iic_opt.fd_step <= 0.0) {
+                std::cerr << "Error: --fd-step must be positive" << std::endl;
+                return 1;
+            }
+        } else if (strcmp(argv[i], "--ev-thresh") == 0 && i + 1 < argc) {
+            iic_opt.ev_thresh = std::atof(argv[++i]);
+            if (iic_opt.ev_thresh < 0.0) {
+                std::cerr << "Error: --ev-thresh must be non-negative" << std::endl;
+                return 1;
+            }
+        } else if (strcmp(argv[i], "--iic-maxiter") == 0 && i + 1 < argc) {
+            iic_opt.max_iter = std::atoi(argv[++i]);
+            if (iic_opt.max_iter <= 0) {
+                std::cerr << "Error: --iic-maxiter must be positive" << std::endl;
+                return 1;
+            }
+        } else if (strcmp(argv[i], "--iic-tol") == 0 && i + 1 < argc) {
+            iic_opt.tol = std::atof(argv[++i]);
+            if (iic_opt.tol <= 0.0) {
+                std::cerr << "Error: --iic-tol must be positive" << std::endl;
+                return 1;
+            }
+        } else if (strcmp(argv[i], "--iic-damp") == 0 && i + 1 < argc) {
+            iic_opt.damp = std::atof(argv[++i]);
+            if (iic_opt.damp < 0.0) {
+                std::cerr << "Error: --iic-damp must be non-negative" << std::endl;
+                return 1;
+            }
+        } else if (strcmp(argv[i], "--iic-max-step") == 0 && i + 1 < argc) {
+            iic_opt.max_cart_step = std::atof(argv[++i]);
+            if (iic_opt.max_cart_step <= 0.0) {
+                std::cerr << "Error: --iic-max-step must be positive" << std::endl;
+                return 1;
+            }
+        } else if (strcmp(argv[i], "--dm-maxiter") == 0 && i + 1 < argc) {
+            dm_opt.max_iter = std::atoi(argv[++i]);
+            if (dm_opt.max_iter <= 0) {
+                std::cerr << "Error: --dm-maxiter must be positive" << std::endl;
+                return 1;
+            }
+        } else if (strcmp(argv[i], "--dm-step") == 0 && i + 1 < argc) {
+            dm_opt.step = std::atof(argv[++i]);
+            if (dm_opt.step <= 0.0) {
+                std::cerr << "Error: --dm-step must be positive" << std::endl;
+                return 1;
+            }
+        } else if (strcmp(argv[i], "--dm-tol") == 0 && i + 1 < argc) {
+            dm_opt.tol = std::atof(argv[++i]);
+            if (dm_opt.tol <= 0.0) {
+                std::cerr << "Error: --dm-tol must be positive" << std::endl;
+                return 1;
+            }
+        } else if (strcmp(argv[i], "--dm-max-step") == 0 && i + 1 < argc) {
+            dm_opt.max_cart_step = std::atof(argv[++i]);
+            if (dm_opt.max_cart_step <= 0.0) {
+                std::cerr << "Error: --dm-max-step must be positive" << std::endl;
+                return 1;
+            }
+        } else if (strcmp(argv[i], "--no-dm-fallback") == 0) {
+            dm_fallback = false;
         } else if (argv[i][0] != '-') {
             if (initial_file.empty()) {
                 initial_file = argv[i];
@@ -620,9 +889,9 @@ int main(int argc, char* argv[]) {
         return 1;
     }
     
-    std::cout << "NEB/LIIC Interpolation Program with Fortran RMSD Alignment\n"
+    std::cout << "NEB/LIIC/IIC/DM Interpolation Program with Fortran RMSD Alignment\n"
               << "=========================================================\n"
-              << "Method: " << (method == "neb" ? "NEB" : "LIIC") << "\n"
+              << "Method: " << method << "\n"
               << "Number of images: " << num_images << "\n"
               << "Structure alignment: " << (use_alignment ? "enabled (Fortran RMSD)" : "disabled") << "\n"
               << "RMSD executable: " << rmsd_executable << "\n"
@@ -631,8 +900,32 @@ int main(int argc, char* argv[]) {
               << "Output mode: " << output_mode << "\n"
               << "Output prefix: " << (prefix.empty() ? "(none)" : prefix) << "\n"
               << std::endl;
-    
+
+    if (method == "iic" || method == "neb-iic") {
+        std::cout << "IIC options: bond_factor=" << iic_opt.bond_factor
+                  << ", fd_step=" << iic_opt.fd_step
+                  << ", ev_thresh=" << iic_opt.ev_thresh
+                  << ", iic_maxiter=" << iic_opt.max_iter
+                  << ", iic_tol=" << iic_opt.tol
+                  << ", iic_damp=" << iic_opt.damp
+                  << ", iic_max_step=" << iic_opt.max_cart_step
+                  << "\n";
+        std::cout << "DM fallback: " << (dm_fallback ? "enabled" : "disabled") << "\n";
+    }
+    if (method == "dm") {
+        std::cout << "DM options: dm_maxiter=" << dm_opt.max_iter
+                  << ", dm_step=" << dm_opt.step
+                  << ", dm_tol=" << dm_opt.tol
+                  << ", dm_max_step=" << dm_opt.max_cart_step
+                  << "\n";
+    }
+
     NEBInterpolator interpolator(num_images, step_size, conv_threshold, max_iterations, use_alignment, rmsd_executable);
+
+    interpolator.setIICOptions(iic_opt);
+    interpolator.setDMOptions(dm_opt);
+    interpolator.setDMFallback(dm_fallback);
+
     
     if (!interpolator.setStructures(initial_file, final_file)) {
         return 1;
@@ -640,8 +933,17 @@ int main(int argc, char* argv[]) {
     
     if (method == "liic") {
         interpolator.performLIIC();
+    } else if (method == "iic") {
+        interpolator.performIIC();
+    } else if (method == "dm") {
+        interpolator.performDM();
+    } else if (method == "neb") {
+        interpolator.performNEB(false);
+    } else if (method == "neb-iic") {
+        interpolator.performNEB(true);
     } else {
-        interpolator.performNEB();
+        std::cerr << "Error: Unknown method: " << method << std::endl;
+        return 1;
     }
     
     bool multiframe = (output_mode == "multiframe");
