@@ -10,6 +10,8 @@
 #include <cstdlib>
 #include <cstdio>
 #include <map>
+#include <filesystem>
+#include <system_error>
 #include <sys/wait.h>
 #include <unistd.h>
 #include <limits.h>
@@ -208,20 +210,20 @@ public:
             aligned_file += "_new.xyz";
         }
         
-        // 将对齐后的文件复制回原文件
-        std::string copy_command = "cp " + aligned_file + " " + mobile_file;
-        int result = system(copy_command.c_str());
-        
-        if (result != 0) {
-            std::cerr << "  Error: Failed to replace original file" << std::endl;
+        // 将对齐后的文件复制回原文件（避免依赖外部 cp 命令，且能正确处理空格路径）
+        std::error_code ec;
+        std::filesystem::copy_file(aligned_file, mobile_file,
+                                   std::filesystem::copy_options::overwrite_existing, ec);
+        if (ec) {
+            std::cerr << "  Error: Failed to replace original file: " << ec.message() << std::endl;
             return false;
         }
-        
-        // 删除临时文件
-        std::string remove_command = "rm " + aligned_file;
-        int ret = system(remove_command.c_str());
-        (void)ret;
-        
+
+        // 删除临时文件（避免依赖外部 rm 命令）
+        ec.clear();
+        std::filesystem::remove(aligned_file, ec);
+        // Ignore removal errors (not fatal)
+
         return true;
     }
     
@@ -684,8 +686,9 @@ public:
             }
             
             // 清理临时文件
-            int ret = system(("rm -f " + temp_final).c_str());
-            (void)ret;
+            std::error_code ec;
+            std::filesystem::remove(temp_final, ec);
+            // Ignore removal errors
         }
         
         return true;
@@ -878,9 +881,12 @@ public:
                         double dy_next = next->atoms[i].y - current.atoms[i].y;
                         double dz_next = next->atoms[i].z - current.atoms[i].z;
 
-                        tangent_x[i] = dx_next - dx_prev;
-                        tangent_y[i] = dy_next - dy_prev;
-                        tangent_z[i] = dz_next - dz_prev;
+                        // Tangent direction should follow the path: R_{i+1} - R_{i-1}
+                        // Here dx_next = R_{i+1}-R_i and dx_prev = R_i-R_{i-1}, so
+                        // R_{i+1}-R_{i-1} = dx_next + dx_prev.
+                        tangent_x[i] = dx_next + dx_prev;
+                        tangent_y[i] = dy_next + dy_prev;
+                        tangent_z[i] = dz_next + dz_prev;
 
                         double norm = std::sqrt(tangent_x[i]*tangent_x[i] + tangent_y[i]*tangent_y[i] + tangent_z[i]*tangent_z[i]);
                         if (norm > 1e-12) {
@@ -1495,8 +1501,6 @@ int main(int argc, char* argv[]) {
     interpolator.setDMOptions(dm_opt);
     interpolator.setDMFallback(dm_fallback);
     interpolator.setExternalEngine(engine_cfg);
-    interpolator.setExternalEngine(engine_cfg);
-
     
     if (!interpolator.setStructures(initial_file, final_file)) {
         return 1;

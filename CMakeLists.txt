@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.10)
 project(MolecularGeometryTools LANGUAGES CXX Fortran)
 
 # Set C++ standard
-set(CMAKE_CXX_STANDARD 11)
+set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Set build type if not specified
@@ -30,34 +30,21 @@ elseif(CMAKE_Fortran_COMPILER_ID MATCHES "Intel")
     set(CMAKE_Fortran_FLAGS_DEBUG "-g -O0")
 endif()
 
-# Option to force using system BLAS instead of MKL
-option(USE_SYSTEM_BLAS "Force using system BLAS/LAPACK instead of MKL" OFF)
-
 # Find required packages
-# If USE_SYSTEM_BLAS is ON, limit search to avoid MKL
-if(USE_SYSTEM_BLAS)
-    # Save MKLROOT temporarily
-    set(MKLROOT_SAVED $ENV{MKLROOT})
-    # Set to empty string to prevent find_package from using MKL
-    set(ENV{MKLROOT} "")
-    # Set BLA_VENDOR to Generic to prefer standard BLAS and avoid MKL
-    set(BLA_VENDOR "Generic" CACHE STRING "BLAS vendor to search for" FORCE)
-    # Disable MKL search by setting MKL_ROOT to empty
-    set(MKL_ROOT "" CACHE PATH "Intel MKL root directory" FORCE)
-    message(STATUS "USE_SYSTEM_BLAS=ON: Limiting BLAS/LAPACK search to system libraries (skipping MKL)")
-endif()
-
 find_package(BLAS REQUIRED)
 find_package(LAPACK REQUIRED)
 
-# Restore MKLROOT if it was set
-if(USE_SYSTEM_BLAS AND MKLROOT_SAVED)
-    set(ENV{MKLROOT} ${MKLROOT_SAVED})
+# Python is only used for lightweight regression test scripts
+find_package(Python3 COMPONENTS Interpreter)
+if(Python3_Interpreter_FOUND)
+    set(PYTHON_EXECUTABLE ${Python3_EXECUTABLE})
+else()
+    set(PYTHON_EXECUTABLE python3)
 endif()
 
 # Check for Intel MKL (preferred)
 set(USE_MKL FALSE)
-if(NOT USE_SYSTEM_BLAS AND DEFINED ENV{MKLROOT})
+if(DEFINED ENV{MKLROOT})
     message(STATUS "Intel MKL found at: $ENV{MKLROOT}")
     set(MKL_ROOT $ENV{MKLROOT})
     set(USE_MKL TRUE)
@@ -95,11 +82,7 @@ if(NOT USE_SYSTEM_BLAS AND DEFINED ENV{MKLROOT})
     endif()
     
 else()
-    if(USE_SYSTEM_BLAS)
-        message(STATUS "USE_SYSTEM_BLAS=ON: Using system BLAS/LAPACK")
-    else()
-        message(STATUS "Intel MKL not found, using system BLAS/LAPACK")
-    endif()
+    message(STATUS "Intel MKL not found, using system BLAS/LAPACK")
     set(MKL_LIBRARIES ${BLAS_LIBRARIES} ${LAPACK_LIBRARIES})
     set(MKL_INCLUDE_DIRS "")
     set(FORTRAN_LIBS ${MKL_LIBRARIES})
@@ -160,10 +143,175 @@ set_target_properties(neb_interpolator PROPERTIES
     COMPILE_FLAGS "-I${CMAKE_BINARY_DIR}/include -I${SRC_DIR}"
 )
 
+# GCC < 9 may require linking stdc++fs explicitly for std::filesystem
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9.0)
+        target_link_libraries(xyzgeom stdc++fs)
+        target_link_libraries(neb_interpolator stdc++fs)
+    endif()
+endif()
+
 # Set output directory for all executables
 set_target_properties(calc_rmsd_xyz xyzgeom neb_interpolator
     PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+)
+
+# ========== Example Files ==========
+
+# Create example XYZ files for testing
+file(WRITE ${CMAKE_BINARY_DIR}/examples/water.xyz 
+"3
+Water molecule
+O    0.000000    0.000000    0.000000
+H    0.758602    0.000000    0.504284
+H    0.758602    0.000000   -0.504284
+")
+
+file(WRITE ${CMAKE_BINARY_DIR}/examples/water_rotated.xyz 
+"3
+Water molecule (rotated)
+O    0.000000    0.000000    0.000000
+H    0.504284    0.758602    0.000000
+H   -0.504284    0.758602    0.000000
+")
+
+file(WRITE ${CMAKE_BINARY_DIR}/examples/ammonia.xyz 
+"4
+Ammonia molecule
+N    0.000000    0.000000    0.000000
+H    0.000000    0.000000    1.012316
+H    0.969771    0.000000   -0.290275
+H   -0.390071   -0.887477   -0.290275
+")
+
+# Extra small molecules for regression tests
+file(WRITE ${CMAKE_BINARY_DIR}/examples/range_ref.xyz
+"3
+Range test reference
+H    0.000000    0.000000    0.000000
+H    1.000000    0.000000    0.000000
+H    0.000000    1.000000    0.000000
+")
+
+file(WRITE ${CMAKE_BINARY_DIR}/examples/range_mobile.xyz
+"3
+Range test mobile (atom 3 shifted)
+H    0.000000    0.000000    0.000000
+H    1.000000    0.000000    0.000000
+H    0.000000    2.000000    0.000000
+")
+
+# Simple 3-atom bond-shift style example (H3 rearrangement-like)
+file(WRITE ${CMAKE_BINARY_DIR}/examples/bondshift_init.xyz
+"3
+Bond shift init
+H    0.000000    0.000000    0.000000
+H    0.740000    0.000000    0.000000
+H    3.000000    0.000000    0.000000
+")
+
+file(WRITE ${CMAKE_BINARY_DIR}/examples/bondshift_final.xyz
+"3
+Bond shift final
+H    0.000000    0.000000    0.000000
+H    2.260000    0.000000    0.000000
+H    3.000000    0.000000    0.000000
+")
+
+# ========== Testing Targets ==========
+
+# Test RMSD alignment
+add_custom_target(test_rmsd
+    COMMAND ${CMAKE_BINARY_DIR}/bin/calc_rmsd_xyz 
+        ${CMAKE_BINARY_DIR}/examples/water.xyz 
+        ${CMAKE_BINARY_DIR}/examples/water_rotated.xyz
+    DEPENDS calc_rmsd_xyz
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+    COMMENT "Testing RMSD alignment with water molecules"
+)
+
+# Test XYZ geometry analyzer
+add_custom_target(test_xyzgeom
+    COMMAND echo "11" | ${CMAKE_BINARY_DIR}/bin/xyzgeom 
+        ${CMAKE_BINARY_DIR}/examples/water.xyz --print
+    DEPENDS xyzgeom
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+    COMMENT "Testing XYZ geometry analyzer"
+)
+
+# Test NEB interpolation
+add_custom_target(test_neb
+    COMMAND ${CMAKE_BINARY_DIR}/bin/neb_interpolator 
+        -n 3 -m liic
+        ${CMAKE_BINARY_DIR}/examples/water.xyz 
+        ${CMAKE_BINARY_DIR}/examples/water_rotated.xyz
+    DEPENDS neb_interpolator calc_rmsd_xyz
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+    COMMENT "Testing NEB interpolation"
+)
+
+# Test IIC interpolation (water)
+add_custom_target(test_iic
+    COMMAND ${CMAKE_BINARY_DIR}/bin/neb_interpolator
+        --no-align -n 3 -m iic
+        ${CMAKE_BINARY_DIR}/examples/water.xyz
+        ${CMAKE_BINARY_DIR}/examples/water_rotated.xyz
+    DEPENDS neb_interpolator
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+    COMMENT "Testing IIC interpolation with water molecules"
+)
+
+# Test DM interpolation (water)
+add_custom_target(test_dm
+    COMMAND ${CMAKE_BINARY_DIR}/bin/neb_interpolator
+        --no-align -n 3 -m dm
+        ${CMAKE_BINARY_DIR}/examples/water.xyz
+        ${CMAKE_BINARY_DIR}/examples/water_rotated.xyz
+    DEPENDS neb_interpolator
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+    COMMENT "Testing DM interpolation with water molecules"
+)
+
+# Test calc_rmsd_xyz range parsing (regression for a variable-reuse bug)
+add_custom_target(test_rmsd_range
+    COMMAND ${PYTHON_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/test_rmsd_range.py
+        ${CMAKE_BINARY_DIR}/bin/calc_rmsd_xyz
+        ${CMAKE_BINARY_DIR}/examples/range_ref.xyz
+        ${CMAKE_BINARY_DIR}/examples/range_mobile.xyz
+    DEPENDS calc_rmsd_xyz
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+    COMMENT "Testing calc_rmsd_xyz with explicit atom ranges"
+)
+
+# Test IIC->DM fallback path (forced IIC failure via --ev-thresh)
+add_custom_target(test_dm_fallback
+    COMMAND ${PYTHON_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/test_dm_fallback.py
+        ${CMAKE_BINARY_DIR}/bin/neb_interpolator
+        ${CMAKE_BINARY_DIR}/examples/bondshift_init.xyz
+        ${CMAKE_BINARY_DIR}/examples/bondshift_final.xyz
+    DEPENDS neb_interpolator
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+    COMMENT "Testing DM fallback when IIC fails"
+)
+
+# Test external engine interface with a mock engine that outputs zero gradients
+add_custom_target(test_external_engine
+    COMMAND ${PYTHON_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/test_external_engine.py
+        ${CMAKE_BINARY_DIR}/bin/neb_interpolator
+        ${CMAKE_SOURCE_DIR}/tests/mock_engine_constant.py
+        ${CMAKE_BINARY_DIR}/examples/water.xyz
+        ${CMAKE_BINARY_DIR}/examples/water_rotated.xyz
+    DEPENDS neb_interpolator
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+    COMMENT "Testing external engine interface"
+)
+
+
+# Run all tests
+add_custom_target(test_all
+    DEPENDS test_rmsd test_rmsd_range test_xyzgeom test_neb test_iic test_dm test_dm_fallback test_external_engine
+    COMMENT "Running all tests"
 )
 
 # ========== Installation ==========
@@ -174,6 +322,11 @@ install(TARGETS calc_rmsd_xyz xyzgeom neb_interpolator
 
 install(FILES ${SRC_DIR}/neb_interpolator.h
     DESTINATION include
+)
+
+install(DIRECTORY ${CMAKE_BINARY_DIR}/examples/
+    DESTINATION share/${PROJECT_NAME}/examples
+    FILES_MATCHING PATTERN "*.xyz"
 )
 
 # ========== Build Information ==========
@@ -201,3 +354,38 @@ message(STATUS "  ${SRC_DIR}/neb_interpolator.h")
 message(STATUS "")
 message(STATUS "Executables will be built in: ${CMAKE_BINARY_DIR}/bin")
 message(STATUS "===========================")
+
+# ========== Usage Target (替换原来的help) ==========
+
+add_custom_target(usage
+    COMMAND echo "Available targets:"
+    COMMAND echo "  all            - Build all executables"
+    COMMAND echo "  xyzgeom        - Build enhanced XYZ geometry analyzer"
+    COMMAND echo "  calc_rmsd_xyz  - Build Fortran RMSD calculator"
+    COMMAND echo "  neb_interpolator - Build standalone NEB interpolator"
+    COMMAND echo "  test_all       - Run all tests"
+    COMMAND echo "  test_rmsd      - Test RMSD alignment"
+    COMMAND echo "  test_xyzgeom   - Test geometry analyzer"
+    COMMAND echo "  test_neb       - Test NEB interpolation"
+    COMMAND echo "  install        - Install executables and files"
+    COMMAND echo "  clean          - Clean build files"
+    COMMAND echo ""
+    COMMAND echo "Usage examples after build:"
+    COMMAND echo "  cd bin"
+    COMMAND echo "  ./xyzgeom molecule.xyz              # Interactive mode"
+    COMMAND echo "  ./xyzgeom molecule.xyz --print      # Print structure"
+    COMMAND echo "  ./calc_rmsd_xyz ref.xyz mobile.xyz  # Align structures"
+    COMMAND echo "  ./neb_interpolator initial.xyz final.xyz  # NEB interpolation"
+    VERBATIM
+)
+
+# ========== Clean Target ==========
+
+add_custom_target(clean_all
+    COMMAND ${CMAKE_COMMAND} -E remove_directory ${CMAKE_BINARY_DIR}/bin
+    COMMAND ${CMAKE_COMMAND} -E remove_directory ${CMAKE_BINARY_DIR}/include
+    COMMAND ${CMAKE_COMMAND} -E remove_directory ${CMAKE_BINARY_DIR}/examples
+    COMMAND ${CMAKE_COMMAND} -E remove ${CMAKE_BINARY_DIR}/*.xyz 2>/dev/null || true
+    COMMENT "Cleaning all generated files"
+    VERBATIM
+)

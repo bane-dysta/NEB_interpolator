@@ -2,3 +2,4 @@ interpolator
 *.sh
 build/*
 *.tgz
+abort/*

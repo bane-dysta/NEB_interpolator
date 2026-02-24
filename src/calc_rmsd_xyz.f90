@@ -18,15 +18,15 @@
 ! MAIN program of subroutine rmsd_wrapper
 program main
  implicit none
- integer :: i, idx(4)
+ integer :: i, narg, idx(4)
  integer, parameter :: iout = 6
  character(len=17) :: str
  character(len=240) :: fname1, fname2
  character(len=4) :: ext1, ext2
  logical :: alive
 
- i = iargc()
- if(.not. (i==2 .or. i==4)) then
+ narg = iargc()
+ if(.not. (narg==2 .or. narg==4)) then
   write(iout,'(/,A)') ' ERROR in subroutine rmsd: wrong command line arguments!'
   write(iout,'(A)') ' Format: ./calc_rmsd_xyz file1 file2 [range1] [range2]'
   write(iout,'(/,A)') ' Example 1: ./calc_rmsd_xyz a.gjf b.gjf'
@@ -81,7 +81,7 @@ program main
 
  idx = 0
  str = ' '
- if(i == 4) then
+ if(narg == 4) then
   call getarg(3,str)
   i = index(str, '-')
   if(i == 0) then

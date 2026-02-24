@@ -10,6 +10,8 @@
 #include <numeric>
 #include <cstring>
 #include <cstdlib>
+#include <filesystem>
+#include <system_error>
 #include "neb_interpolator.h"
 
 struct Atom {
@@ -193,8 +195,9 @@ public:
         
         if (result != 0) {
             std::cerr << "Error: Alignment failed with exit code " << result << std::endl;
-            int ret = system(("rm -f " + tempFile).c_str());
-            (void)ret;
+            std::error_code ec;
+            std::filesystem::remove(tempFile, ec);
+            (void)ec;
             return;
         }
         
@@ -202,18 +205,20 @@ public:
         std::string alignedFile = "temp_mobile_new.xyz";
         if (!loadXYZ(alignedFile)) {
             std::cerr << "Error: Cannot load aligned structure" << std::endl;
-            int ret = system(("rm -f " + tempFile).c_str());
-            (void)ret;
+            std::error_code ec;
+            std::filesystem::remove(tempFile, ec);
+            (void)ec;
             return;
         }
         
         std::cout << "Structure aligned successfully and loaded into memory." << std::endl;
         
         // Clean up temp files
-        int ret1 = system(("rm -f " + tempFile).c_str());
-        int ret2 = system(("rm -f " + alignedFile).c_str());
-        (void)ret1;
-        (void)ret2;
+        std::error_code ec;
+        std::filesystem::remove(tempFile, ec);
+        ec.clear();
+        std::filesystem::remove(alignedFile, ec);
+        (void)ec;
     }
     
     // Function 14: NEB interpolation with second XYZ file

@@ -1,0 +1,7 @@
+# Z-Matrix format
+# Atom  Bond_ref  Bond(A)    Angle_ref  Angle(deg)  Dihedral_ref  Dihedral(deg)
+C   
+H        1    1.070000
+H        1    1.070000       2  109.4712
+H        1    1.070000       2  109.4712       3    -74.0642
+H        1    1.070000       2  109.4712       3     74.0642
