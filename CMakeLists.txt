@@ -151,7 +151,11 @@ set_target_properties(xyzgeom PROPERTIES
 )
 
 # 3. C++ NEB Interpolator standalone executable
-add_executable(neb_interpolator ${SRC_DIR}/neb_interpolator.cpp)
+add_executable(neb_interpolator 
+    ${SRC_DIR}/neb_interpolator.cpp
+    ${SRC_DIR}/internal_ic.cpp
+    ${SRC_DIR}/zmat/covalent_radii.cpp
+)
 set_target_properties(neb_interpolator PROPERTIES 
     COMPILE_FLAGS "-I${CMAKE_BINARY_DIR}/include -I${SRC_DIR}"
 )
