@@ -9,15 +9,17 @@
 #include <set>
 #include <numeric>
 #include <cstring>
+#include <cctype>
 #include <cstdlib>
 #include <filesystem>
 #include <system_error>
-#include "neb_interpolator.h"
+#include "geometry.h"
+#include "util.h"
+#include "neb_driver.h"
+#include "rmsd_align.h"
 
-struct Atom {
-    std::string element;
-    double x, y, z;
-};
+using Atom = geom::Atom;
+
 
 class MoleculeAnalyzer {
 private:
@@ -26,44 +28,150 @@ private:
     bool useBohr = false; // false = Angstrom, true = Bohr
     const double BOHR_TO_ANG = 0.529177211;
     
-    // Parse Gview-style index string (supports both full-width and half-width commas)
-    std::set<int> parseIndices(const std::string& str) {
-        std::set<int> indices;
+    // Parse Gview-style index selection string.
+    //
+    // Two variants are provided:
+    //   - parseIndicesOrdered(): preserves the user input order (needed when the
+    //     order has semantic meaning, e.g. angle/dihedral/vector direction).
+    //   - parseIndicesSet(): set semantics (sorted + unique), useful for
+    //     "select a group of atoms" operations.
+    //
+    // Supports both full-width and half-width commas.
+    std::vector<int> parseIndicesOrdered(const std::string& str) {
+        std::vector<int> indices;
         std::string cleaned = str;
-        
+
         // Replace full-width comma with half-width
         size_t pos = 0;
         while ((pos = cleaned.find("，")) != std::string::npos) {
             cleaned.replace(pos, 3, ","); // Full-width comma is 3 bytes
         }
-        
+
+        auto is_space = [](unsigned char c) { return std::isspace(c) != 0; };
+
+        auto parse_int = [](const std::string& s, int& out) -> bool {
+            try {
+                size_t idx = 0;
+                int v = std::stoi(s, &idx);
+                if (idx != s.size()) return false;
+                out = v;
+                return true;
+            } catch (...) {
+                return false;
+            }
+        };
+
         std::stringstream ss(cleaned);
         std::string token;
-        
+
         while (std::getline(ss, token, ',')) {
             // Remove whitespace
-            token.erase(std::remove_if(token.begin(), token.end(), ::isspace), token.end());
-            
+            token.erase(std::remove_if(token.begin(), token.end(), is_space), token.end());
+            if (token.empty()) continue;
+
             size_t dashPos = token.find('-');
             if (dashPos != std::string::npos) {
                 // Range format: start-end
-                int start = std::stoi(token.substr(0, dashPos));
-                int end = std::stoi(token.substr(dashPos + 1));
+                int start = 0, end = 0;
+                if (!parse_int(token.substr(0, dashPos), start) || !parse_int(token.substr(dashPos + 1), end)) {
+                    continue;
+                }
+                if (start > end) std::swap(start, end);
                 for (int i = start; i <= end; i++) {
                     if (i > 0 && static_cast<size_t>(i) <= atoms.size()) {
-                        indices.insert(i - 1); // Convert to 0-based
+                        indices.push_back(i - 1); // Convert to 0-based
                     }
                 }
             } else {
                 // Single number
-                int idx = std::stoi(token);
+                int idx = 0;
+                if (!parse_int(token, idx)) continue;
                 if (idx > 0 && static_cast<size_t>(idx) <= atoms.size()) {
-                    indices.insert(idx - 1); // Convert to 0-based
+                    indices.push_back(idx - 1); // Convert to 0-based
                 }
             }
         }
-        
+
         return indices;
+    }
+
+    std::set<int> parseIndicesSet(const std::string& str) {
+        const std::vector<int> ordered = parseIndicesOrdered(str);
+        return std::set<int>(ordered.begin(), ordered.end());
+    }
+
+    static bool hasDuplicates(const std::vector<int>& v) {
+        std::set<int> s(v.begin(), v.end());
+        return s.size() != v.size();
+    }
+
+    bool swapAtomsBySelection_(const std::string& selection, std::string* err) {
+        auto indices = parseIndicesSet(selection);
+        if (indices.size() != 2) {
+            if (err) *err = "Error: Please select exactly 2 atoms.";
+            return false;
+        }
+
+        auto it = indices.begin();
+        const int i = *it;
+        ++it;
+        const int j = *it;
+
+        if (i < 0 || j < 0 || static_cast<size_t>(i) >= atoms.size() || static_cast<size_t>(j) >= atoms.size()) {
+            if (err) *err = "Error: Atom index out of range.";
+            return false;
+        }
+
+        std::swap(atoms[i], atoms[j]);
+        return true;
+    }
+
+    bool mirrorThroughPlaneBySelection_(const std::string& selection, std::string* err) {
+        auto indices = parseIndicesSet(selection);
+        if (indices.size() != 3) {
+            if (err) *err = "Error: Please select exactly 3 atoms.";
+            return false;
+        }
+
+        std::vector<int> idx(indices.begin(), indices.end());
+        if (idx[0] < 0 || idx[1] < 0 || idx[2] < 0 ||
+            static_cast<size_t>(idx[0]) >= atoms.size() ||
+            static_cast<size_t>(idx[1]) >= atoms.size() ||
+            static_cast<size_t>(idx[2]) >= atoms.size()) {
+            if (err) *err = "Error: Atom index out of range.";
+            return false;
+        }
+
+        // Calculate plane equation ax + by + cz + d = 0
+        double v1x = atoms[idx[1]].x - atoms[idx[0]].x;
+        double v1y = atoms[idx[1]].y - atoms[idx[0]].y;
+        double v1z = atoms[idx[1]].z - atoms[idx[0]].z;
+
+        double v2x = atoms[idx[2]].x - atoms[idx[0]].x;
+        double v2y = atoms[idx[2]].y - atoms[idx[0]].y;
+        double v2z = atoms[idx[2]].z - atoms[idx[0]].z;
+
+        double a, b, c;
+        crossProduct(v1x, v1y, v1z, v2x, v2y, v2z, a, b, c);
+        normalize(a, b, c);
+
+        const double norm2 = a * a + b * b + c * c;
+        if (norm2 < 1e-20) {
+            if (err) *err = "Error: Invalid plane (three points are collinear or duplicated).";
+            return false;
+        }
+
+        double d = -(a * atoms[idx[0]].x + b * atoms[idx[0]].y + c * atoms[idx[0]].z);
+
+        // Mirror all atoms
+        for (auto& atom : atoms) {
+            double dist = a * atom.x + b * atom.y + c * atom.z + d;
+            atom.x = atom.x - 2 * dist * a;
+            atom.y = atom.y - 2 * dist * b;
+            atom.z = atom.z - 2 * dist * c;
+        }
+
+        return true;
     }
     
     double getDistance(const Atom& a1, const Atom& a2) {
@@ -105,28 +213,13 @@ private:
     
 public:
     bool loadXYZ(const std::string& filename) {
-        std::ifstream file(filename);
-        if (!file.is_open()) {
-            std::cerr << "Error: Cannot open file " << filename << std::endl;
+        geom::Structure s;
+        if (!s.readXYZ(filename)) {
             return false;
         }
-        
-        atoms.clear();
-        int natoms;
-        file >> natoms;
-        file.ignore(); // Skip rest of first line
-        
-        std::string comment;
-        std::getline(file, comment); // Skip comment line
-        
-        for (int i = 0; i < natoms; i++) {
-            Atom atom;
-            file >> atom.element >> atom.x >> atom.y >> atom.z;
-            atoms.push_back(atom);
-        }
-        
+
+        atoms = std::move(s.atoms);
         currentFile = filename;
-        file.close();
         return true;
     }
     
@@ -141,7 +234,7 @@ public:
         file << "Generated by Molecular Geometry Analyzer" << std::endl;
         
         for (const auto& atom : atoms) {
-            file << std::setw(4) << atom.element 
+            file << std::setw(4) << atom.symbol 
                  << std::fixed << std::setprecision(6)
                  << std::setw(12) << atom.x
                  << std::setw(12) << atom.y
@@ -156,7 +249,7 @@ public:
         std::cout << atoms.size() << std::endl;
         std::cout << "Current structure" << std::endl;
         for (const auto& atom : atoms) {
-            std::cout << std::setw(4) << atom.element 
+            std::cout << std::setw(4) << atom.symbol 
                      << std::fixed << std::setprecision(6)
                      << std::setw(12) << atom.x
                      << std::setw(12) << atom.y
@@ -174,7 +267,7 @@ public:
         std::cout << "Enter reference XYZ filename to align with: ";
         std::string refFile;
         std::getline(std::cin, refFile);
-        
+
         // Check if reference file exists
         std::ifstream check(refFile);
         if (!check.is_open()) {
@@ -182,45 +275,44 @@ public:
             return;
         }
         check.close();
-        
-        // Save current structure to temp file
-        std::string tempFile = "temp_mobile.xyz";
+
+        // Save current structure to a unique temp file
+        const std::string tempFile = util::makeTempFilePath("xyzgeom_mobile_", ".xyz").string();
         saveXYZ(tempFile);
-        
-        // Call calc_rmsd_xyz program
-        std::string command = "./calc_rmsd_xyz " + refFile + " " + tempFile;
-        std::cout << "Running alignment: " << command << std::endl;
-        
-        int result = system(command.c_str());
-        
-        if (result != 0) {
-            std::cerr << "Error: Alignment failed with exit code " << result << std::endl;
+
+        // Use the shared RMSD alignment module (same lookup + invocation behavior as neb_interpolator)
+        const std::string rmsd_exec = rmsd::findCalcRMSDExecutable();
+        rmsd::FortranRMSDAligner aligner(rmsd_exec);
+
+        std::cout << "Aligning with calc_rmsd_xyz: " << rmsd_exec << std::endl;
+
+        if (!aligner.alignAndReplace(refFile, tempFile)) {
+            std::cerr << "Error: Alignment failed" << std::endl;
             std::error_code ec;
             std::filesystem::remove(tempFile, ec);
             (void)ec;
             return;
         }
-        
+
         // Load aligned structure back into memory
-        std::string alignedFile = "temp_mobile_new.xyz";
-        if (!loadXYZ(alignedFile)) {
+        const std::string oldFile = currentFile;
+        if (!loadXYZ(tempFile)) {
             std::cerr << "Error: Cannot load aligned structure" << std::endl;
             std::error_code ec;
             std::filesystem::remove(tempFile, ec);
             (void)ec;
             return;
         }
-        
+        currentFile = oldFile;
+
         std::cout << "Structure aligned successfully and loaded into memory." << std::endl;
-        
-        // Clean up temp files
+
+        // Clean up temp file
         std::error_code ec;
         std::filesystem::remove(tempFile, ec);
-        ec.clear();
-        std::filesystem::remove(alignedFile, ec);
         (void)ec;
     }
-    
+
     // Function 14: NEB interpolation with second XYZ file
     void performNEBWithSecondXYZ() {
         std::cout << "Enter final XYZ filename for NEB interpolation: ";
@@ -238,9 +330,21 @@ public:
         std::cout << "Enter number of intermediate images (default 5): ";
         std::string input;
         std::getline(std::cin, input);
-        int numImages = input.empty() ? 5 : std::stoi(input);
+        int numImages = 5;
+        if (!input.empty()) {
+            try {
+                numImages = std::stoi(input);
+            } catch (...) {
+                std::cerr << "Warning: Invalid number of images, using default 5." << std::endl;
+                numImages = 5;
+            }
+        }
+        if (numImages <= 0) {
+            std::cerr << "Warning: Number of images must be positive, using default 5." << std::endl;
+            numImages = 5;
+        }
         
-        std::cout << "Use NEB (n) or LIIC (l) method? (default n): ";
+        std::cout << "Use NEB (n) or LIC (l) method? (default n): ";
         std::getline(std::cin, input);
         bool useNEB = (input.empty() || input == "n" || input == "N");
         
@@ -249,53 +353,61 @@ public:
         std::getline(std::cin, prefix);
         if (prefix.empty()) prefix = "neb_";
         
-        // Create NEB interpolator
-        SimpleNEBInterpolator interpolator(numImages);
-        
-        // Convert current atoms to NEB format
-        std::vector<NEBAtom> nebAtoms;
+        // Shared NEB / interpolation driver (same implementation as neb_interpolator)
+        neb::NEBDriver driver(numImages);
+        driver.setRMSDExecutable(rmsd::findCalcRMSDExecutable());
+
+        // Convert current atoms to driver format (geom::Atom)
+        std::vector<geom::Atom> init_atoms;
+        init_atoms.reserve(atoms.size());
         for (const auto& atom : atoms) {
-            nebAtoms.push_back(NEBAtom(atom.element, atom.x, atom.y, atom.z));
+            init_atoms.emplace_back(atom.symbol, atom.x, atom.y, atom.z);
         }
-        
-        // Set initial structure from memory
-        interpolator.setInitialFromMemory(nebAtoms);
-        
-        // Set final structure from file
-        if (!interpolator.setFinalFromFile(finalFile)) {
-            std::cerr << "Error: Failed to set up NEB interpolation" << std::endl;
+        driver.setInitialFromMemory(init_atoms, "Initial structure (xyzgeom)");
+
+        std::string err;
+        if (!driver.setFinalFromFile(finalFile, &err)) {
+            std::cerr << err << std::endl;
             return;
         }
-        
-        // Perform interpolation
+
         if (useNEB) {
-            interpolator.performNEB();
+            if (!driver.run(neb::Method::NEB, &err)) {
+                std::cerr << (err.empty() ? "Error: NEB failed" : err) << std::endl;
+                return;
+            }
         } else {
-            interpolator.performLIIC();
+            if (!driver.run(neb::Method::LIC, &err)) {
+                std::cerr << (err.empty() ? "Error: LIC failed" : err) << std::endl;
+                return;
+            }
         }
-        
-        // Write results
-        if (!interpolator.writeResults(prefix)) {
-            std::cerr << "Error: Failed to write NEB results" << std::endl;
+
+        if (!driver.writeResults(prefix, /*multiframe=*/false)) {
+            std::cerr << "Error: Failed to write results" << std::endl;
             return;
         }
-        
+
         std::cout << "NEB interpolation completed successfully!" << std::endl;
     }
     
     // Function 1: Calculate distance and vector between 2 atoms
     void calculateDistanceVector() {
-        std::cout << "Enter indices of 2 atoms (Gview format, e.g., 1,3): ";
+        std::cout << "Enter indices of 2 atoms (i,j; vector points i -> j): ";
         std::string input;
         std::getline(std::cin, input);
         
-        auto indices = parseIndices(input);
-        if (indices.size() != 2) {
+        auto idx = parseIndicesOrdered(input);
+        if (idx.size() != 2) {
             std::cout << "Error: Please select exactly 2 atoms." << std::endl;
             return;
         }
+
+        if (hasDuplicates(idx)) {
+            std::cout << "Error: Duplicate atom indices are not allowed." << std::endl;
+            return;
+        }
         
-        std::vector<int> idx(indices.begin(), indices.end());
         double dist = getDistance(atoms[idx[0]], atoms[idx[1]]);
         
         double vx, vy, vz;
@@ -308,37 +420,35 @@ public:
     }
     
     // Function 2: Swap two atoms
-    void swapAtoms(bool commandLine = false) {
-        if (!commandLine) {
-            std::cout << "Enter indices of 2 atoms to swap (Gview format): ";
-            std::string input;
-            std::getline(std::cin, input);
-            
-            auto indices = parseIndices(input);
-            if (indices.size() != 2) {
-                std::cout << "Error: Please select exactly 2 atoms." << std::endl;
-                return;
-            }
-            
-            std::vector<int> idx(indices.begin(), indices.end());
-            std::swap(atoms[idx[0]], atoms[idx[1]]);
-            std::cout << "Atoms swapped successfully." << std::endl;
+    void swapAtoms() {
+        std::cout << "Enter indices of 2 atoms to swap (Gview format): ";
+        std::string input;
+        std::getline(std::cin, input);
+
+        std::string err;
+        if (!swapAtomsBySelection_(input, &err)) {
+            std::cout << err << std::endl;
+            return;
         }
+        std::cout << "Atoms swapped successfully." << std::endl;
     }
     
     // Function 3: Calculate bond angle and plane normal
     void calculateBondAngle() {
-        std::cout << "Enter indices of 3 atoms (Gview format): ";
+        std::cout << "Enter indices of 3 atoms (i,j,k; j is the vertex): ";
         std::string input;
         std::getline(std::cin, input);
         
-        auto indices = parseIndices(input);
-        if (indices.size() != 3) {
+        auto idx = parseIndicesOrdered(input);
+        if (idx.size() != 3) {
             std::cout << "Error: Please select exactly 3 atoms." << std::endl;
             return;
         }
-        
-        std::vector<int> idx(indices.begin(), indices.end());
+
+        if (hasDuplicates(idx)) {
+            std::cout << "Error: Duplicate atom indices are not allowed." << std::endl;
+            return;
+        }
         
         // Calculate vectors
         double v1x = atoms[idx[0]].x - atoms[idx[1]].x;
@@ -353,7 +463,14 @@ public:
         double dot = dotProduct(v1x, v1y, v1z, v2x, v2y, v2z);
         double mag1 = std::sqrt(v1x*v1x + v1y*v1y + v1z*v1z);
         double mag2 = std::sqrt(v2x*v2x + v2y*v2y + v2z*v2z);
-        double angle = std::acos(dot / (mag1 * mag2)) * 180.0 / M_PI;
+        const double denom = mag1 * mag2;
+        if (denom < 1e-12) {
+            std::cout << "Error: Cannot compute angle (degenerate geometry; zero-length vector)." << std::endl;
+            return;
+        }
+        double cosv = dot / denom;
+        cosv = std::clamp(cosv, -1.0, 1.0);
+        double angle = std::acos(cosv) * 180.0 / M_PI;
         
         // Calculate plane normal
         double nx, ny, nz;
@@ -372,7 +489,7 @@ public:
         std::string input1;
         std::getline(std::cin, input1);
         
-        auto indices1 = parseIndices(input1);
+        auto indices1 = parseIndicesSet(input1);
         if (indices1.size() != 3) {
             std::cout << "Error: Please select exactly 3 atoms for first plane." << std::endl;
             return;
@@ -382,7 +499,7 @@ public:
         std::string input2;
         std::getline(std::cin, input2);
         
-        auto indices2 = parseIndices(input2);
+        auto indices2 = parseIndicesSet(input2);
         if (indices2.size() != 3) {
             std::cout << "Error: Please select exactly 3 atoms for second plane." << std::endl;
             return;
@@ -403,6 +520,11 @@ public:
         double n1x, n1y, n1z;
         crossProduct(v1x, v1y, v1z, v2x, v2y, v2z, n1x, n1y, n1z);
         normalize(n1x, n1y, n1z);
+        const double n1norm2 = n1x*n1x + n1y*n1y + n1z*n1z;
+        if (n1norm2 < 1e-20) {
+            std::cout << "Error: First plane is invalid (points are collinear or duplicated)." << std::endl;
+            return;
+        }
         
         // Calculate normal for plane 2
         v1x = atoms[idx2[1]].x - atoms[idx2[0]].x;
@@ -416,70 +538,51 @@ public:
         double n2x, n2y, n2z;
         crossProduct(v1x, v1y, v1z, v2x, v2y, v2z, n2x, n2y, n2z);
         normalize(n2x, n2y, n2z);
+        const double n2norm2 = n2x*n2x + n2y*n2y + n2z*n2z;
+        if (n2norm2 < 1e-20) {
+            std::cout << "Error: Second plane is invalid (points are collinear or duplicated)." << std::endl;
+            return;
+        }
         
-        // Calculate angle between normals
+        // Calculate (acute) angle between planes: invariant to normal direction.
         double dot = dotProduct(n1x, n1y, n1z, n2x, n2y, n2z);
-        double angle = std::acos(std::min(1.0, std::max(-1.0, dot))) * 180.0 / M_PI;
+        dot = std::clamp(dot, -1.0, 1.0);
+        double angle = std::acos(std::fabs(dot)) * 180.0 / M_PI;
         
         std::cout << "\nAngle between planes: " << std::fixed << std::setprecision(2) 
                   << angle << " degrees" << std::endl;
     }
     
     // Function 5: Mirror molecule through plane
-    void mirrorThroughPlane(bool commandLine = false) {
-        if (!commandLine) {
-            std::cout << "Enter indices of 3 atoms defining the plane (Gview format): ";
-            std::string input;
-            std::getline(std::cin, input);
-            
-            auto indices = parseIndices(input);
-            if (indices.size() != 3) {
-                std::cout << "Error: Please select exactly 3 atoms." << std::endl;
-                return;
-            }
-            
-            std::vector<int> idx(indices.begin(), indices.end());
-            
-            // Calculate plane equation ax + by + cz + d = 0
-            double v1x = atoms[idx[1]].x - atoms[idx[0]].x;
-            double v1y = atoms[idx[1]].y - atoms[idx[0]].y;
-            double v1z = atoms[idx[1]].z - atoms[idx[0]].z;
-            
-            double v2x = atoms[idx[2]].x - atoms[idx[0]].x;
-            double v2y = atoms[idx[2]].y - atoms[idx[0]].y;
-            double v2z = atoms[idx[2]].z - atoms[idx[0]].z;
-            
-            double a, b, c;
-            crossProduct(v1x, v1y, v1z, v2x, v2y, v2z, a, b, c);
-            normalize(a, b, c);
-            
-            double d = -(a * atoms[idx[0]].x + b * atoms[idx[0]].y + c * atoms[idx[0]].z);
-            
-            // Mirror all atoms
-            for (auto& atom : atoms) {
-                double dist = a * atom.x + b * atom.y + c * atom.z + d;
-                atom.x = atom.x - 2 * dist * a;
-                atom.y = atom.y - 2 * dist * b;
-                atom.z = atom.z - 2 * dist * c;
-            }
-            
-            std::cout << "Molecule mirrored successfully." << std::endl;
+    void mirrorThroughPlane() {
+        std::cout << "Enter indices of 3 atoms defining the plane (Gview format): ";
+        std::string input;
+        std::getline(std::cin, input);
+
+        std::string err;
+        if (!mirrorThroughPlaneBySelection_(input, &err)) {
+            std::cout << err << std::endl;
+            return;
         }
+        std::cout << "Molecule mirrored successfully." << std::endl;
     }
     
     // Function 6: Calculate dihedral angle
     void calculateDihedralAngle() {
-        std::cout << "Enter indices of 4 atoms (Gview format): ";
+        std::cout << "Enter indices of 4 atoms (i,j,k,l in order): ";
         std::string input;
         std::getline(std::cin, input);
         
-        auto indices = parseIndices(input);
-        if (indices.size() != 4) {
+        auto idx = parseIndicesOrdered(input);
+        if (idx.size() != 4) {
             std::cout << "Error: Please select exactly 4 atoms." << std::endl;
             return;
         }
-        
-        std::vector<int> idx(indices.begin(), indices.end());
+
+        if (hasDuplicates(idx)) {
+            std::cout << "Error: Duplicate atom indices are not allowed." << std::endl;
+            return;
+        }
         
         // Vectors
         double v1x = atoms[idx[1]].x - atoms[idx[0]].x;
@@ -504,8 +607,15 @@ public:
         // Calculate dihedral angle
         double x = dotProduct(n1x, n1y, n1z, n2x, n2y, n2z);
         double y = std::sqrt(n1x*n1x + n1y*n1y + n1z*n1z) * std::sqrt(n2x*n2x + n2y*n2y + n2z*n2z);
-        
-        double angle = std::acos(x / y) * 180.0 / M_PI;
+
+        if (y < 1e-12) {
+            std::cout << "Error: Cannot compute dihedral (degenerate geometry; plane normal is near zero)." << std::endl;
+            return;
+        }
+
+        double cosv = x / y;
+        cosv = std::clamp(cosv, -1.0, 1.0);
+        double angle = std::acos(cosv) * 180.0 / M_PI;
         
         // Determine sign
         double cx, cy, cz;
@@ -524,7 +634,7 @@ public:
         std::string input;
         std::getline(std::cin, input);
         
-        auto indices = parseIndices(input);
+        auto indices = parseIndicesSet(input);
         if (indices.empty()) {
             std::cout << "Error: Please select at least one atom." << std::endl;
             return;
@@ -558,7 +668,7 @@ public:
         std::string input;
         std::getline(std::cin, input);
         
-        auto indices = parseIndices(input);
+        auto indices = parseIndicesSet(input);
         if (indices.empty()) {
             std::cout << "Error: Please select at least one atom." << std::endl;
             return;
@@ -578,7 +688,7 @@ public:
         file << "Selected atoms from " << currentFile << std::endl;
         
         for (int idx : indices) {
-            file << std::setw(4) << atoms[idx].element 
+            file << std::setw(4) << atoms[idx].symbol 
                  << std::fixed << std::setprecision(6)
                  << std::setw(12) << atoms[idx].x
                  << std::setw(12) << atoms[idx].y
@@ -595,7 +705,7 @@ public:
         std::string input;
         std::getline(std::cin, input);
         
-        auto indices = parseIndices(input);
+        auto indices = parseIndicesSet(input);
         if (indices.size() != 1) {
             std::cout << "Error: Please select exactly 1 atom." << std::endl;
             return;
@@ -674,7 +784,7 @@ public:
         file << "Atoms within " << radius << " Angstrom of atom " << (centerIdx + 1) << std::endl;
         
         // Write center atom first
-        file << std::setw(4) << atoms[centerIdx].element 
+        file << std::setw(4) << atoms[centerIdx].symbol 
              << std::fixed << std::setprecision(6)
              << std::setw(12) << atoms[centerIdx].x
              << std::setw(12) << atoms[centerIdx].y
@@ -682,7 +792,7 @@ public:
         
         // Write nearby atoms
         for (int idx : nearbyAtoms) {
-            file << std::setw(4) << atoms[idx].element 
+            file << std::setw(4) << atoms[idx].symbol 
                  << std::fixed << std::setprecision(6)
                  << std::setw(12) << atoms[idx].x
                  << std::setw(12) << atoms[idx].y
@@ -715,14 +825,14 @@ public:
     // Function 12: Toggle units
     void toggleUnits() {
         useBohr = !useBohr;
-        std::cout << "Units changed to: " << (useBohr ? "Bohr" : "Angstrom") << std::endl;
+        std::cout << "Distance unit changed to: " << (useBohr ? "Bohr" : "Angstrom") << std::endl;
     }
     
     void showMenu() {
         std::cout << "\n========== Molecular Geometry Analyzer ==========" << std::endl;
         std::cout << "Current file: " << currentFile << std::endl;
         std::cout << "Atoms loaded: " << atoms.size() << std::endl;
-        std::cout << "Current units: " << (useBohr ? "Bohr" : "Angstrom") << std::endl;
+        std::cout << "Distance unit: " << (useBohr ? "Bohr" : "Angstrom") << std::endl;
         std::cout << "\n-1. Print current structure to screen" << std::endl;
         std::cout << "1.  Calculate distance and vector between 2 atoms" << std::endl;
         std::cout << "2.  Swap two atoms" << std::endl;
@@ -735,7 +845,7 @@ public:
         std::cout << "9.  Find atoms within radius" << std::endl;
         std::cout << "10. Export current structure to XYZ" << std::endl;
         std::cout << "11. Load new XYZ file" << std::endl;
-        std::cout << "12. Toggle units (Bohr/Angstrom)" << std::endl;
+        std::cout << "12. Toggle distance unit (Bohr/Angstrom)" << std::endl;
         std::cout << "13. Align with second XYZ file (RMSD)" << std::endl;
         std::cout << "14. NEB interpolation with second XYZ file" << std::endl;
         std::cout << "0.  Exit" << std::endl;
@@ -749,40 +859,19 @@ public:
         std::string operation = argv[2];
         
         if (operation == "--swap" && argc >= 4) {
-            auto indices = parseIndices(argv[3]);
-            if (indices.size() == 2) {
-                std::vector<int> idx(indices.begin(), indices.end());
-                std::swap(atoms[idx[0]], atoms[idx[1]]);
-                printXYZ();
+            std::string err;
+            if (!swapAtomsBySelection_(argv[3], &err)) {
+                std::cerr << err << std::endl;
+                return;
             }
+            printXYZ();
         } else if (operation == "--mirror" && argc >= 4) {
-            auto indices = parseIndices(argv[3]);
-            if (indices.size() == 3) {
-                std::vector<int> idx(indices.begin(), indices.end());
-                
-                double v1x = atoms[idx[1]].x - atoms[idx[0]].x;
-                double v1y = atoms[idx[1]].y - atoms[idx[0]].y;
-                double v1z = atoms[idx[1]].z - atoms[idx[0]].z;
-                
-                double v2x = atoms[idx[2]].x - atoms[idx[0]].x;
-                double v2y = atoms[idx[2]].y - atoms[idx[0]].y;
-                double v2z = atoms[idx[2]].z - atoms[idx[0]].z;
-                
-                double a, b, c;
-                crossProduct(v1x, v1y, v1z, v2x, v2y, v2z, a, b, c);
-                normalize(a, b, c);
-                
-                double d = -(a * atoms[idx[0]].x + b * atoms[idx[0]].y + c * atoms[idx[0]].z);
-                
-                for (auto& atom : atoms) {
-                    double dist = a * atom.x + b * atom.y + c * atom.z + d;
-                    atom.x = atom.x - 2 * dist * a;
-                    atom.y = atom.y - 2 * dist * b;
-                    atom.z = atom.z - 2 * dist * c;
-                }
-                
-                printXYZ();
+            std::string err;
+            if (!mirrorThroughPlaneBySelection_(argv[3], &err)) {
+                std::cerr << err << std::endl;
+                return;
             }
+            printXYZ();
         } else if (operation == "--print") {
             printXYZ();
         }

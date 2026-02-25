@@ -328,7 +328,7 @@ double rms_residual(const std::vector<double>& q_target,
     return std::sqrt(ss / m);
 }
 
-// Main IIC interpolation (returns false if any image fails; caller may fallback to DM/LIIC).
+// Main LIIC interpolation (returns false if any image fails; caller may fallback to DM/LIC).
 bool interpolate_iic(const std::vector<std::string>& symbols,
                      const std::vector<double>& x0,
                      const std::vector<double>& x1,
@@ -341,7 +341,7 @@ bool interpolate_iic(const std::vector<std::string>& symbols,
     if (nimages <= 0) return true;
     const int n = static_cast<int>(symbols.size());
     if ((int)x0.size() != 3*n || (int)x1.size() != 3*n) {
-        if (err_msg) *err_msg = "IIC: xyz size mismatch.";
+        if (err_msg) *err_msg = "LIIC: xyz size mismatch.";
         return false;
     }
 
@@ -350,7 +350,7 @@ bool interpolate_iic(const std::vector<std::string>& symbols,
     build_union_primitives(symbols, x0, x1, opt, prims);
     const int m = static_cast<int>(prims.size());
     if (m <= 0) {
-        if (err_msg) *err_msg = "IIC: primitive list empty (bond_factor too small?).";
+        if (err_msg) *err_msg = "LIIC: primitive list empty (bond_factor too small?).";
         return false;
     }
 
@@ -389,7 +389,6 @@ bool interpolate_iic(const std::vector<std::string>& symbols,
         }
 
         std::vector<double> q_cur;
-        double rms0 = 1e100;
 
         bool converged = false;
         for (int it=0; it<opt.max_iter; ++it) {
@@ -421,7 +420,7 @@ bool interpolate_iic(const std::vector<std::string>& symbols,
             // Diagonalize G
             std::vector<double> evals, evecs;
             if (!jacobi_eigen(G, m, evals, evecs)) {
-                if (err_msg) *err_msg = "IIC: Jacobi eigen failed.";
+                if (err_msg) *err_msg = "LIIC: Jacobi eigen failed.";
                 return false;
             }
 
@@ -455,7 +454,7 @@ bool interpolate_iic(const std::vector<std::string>& symbols,
                 ++nsel;
             }
             if (nsel == 0) {
-                if (err_msg) *err_msg = "IIC: no DLC eigenvectors selected (ev_thresh too large?).";
+                if (err_msg) *err_msg = "LIIC: no DLC eigenvectors selected (ev_thresh too large?).";
                 return false;
             }
 
@@ -494,9 +493,12 @@ bool interpolate_iic(const std::vector<std::string>& symbols,
                 compute_primitives(x_trial, prims, q_trial);
                 double rms_trial = rms_residual(q_target, q_trial, prims);
 
-                if (rms_trial <= rms*(1.0 + 1e-6) || rms_trial < rms0) {
+                // Accept only non-worsening steps (within a tiny tolerance).
+                // The previous implementation also compared against a global
+                // rms0 initialized to 1e100, which could accept a worse first
+                // step unconditionally.
+                if (rms_trial <= rms*(1.0 + 1e-6)) {
                     x.swap(x_trial);
-                    rms0 = rms_trial;
                     accepted = true;
                     break;
                 }
@@ -506,7 +508,7 @@ bool interpolate_iic(const std::vector<std::string>& symbols,
             if (!accepted) {
                 if (err_msg) {
                     std::ostringstream oss;
-                    oss << "IIC: back-transform diverged (image " << (img+1) << ", iter " << it << ").";
+                    oss << "LIIC: back-transform diverged (image " << (img+1) << ", iter " << it << ").";
                     *err_msg = oss.str();
                 }
                 return false;
@@ -516,7 +518,7 @@ bool interpolate_iic(const std::vector<std::string>& symbols,
         if (!converged) {
             if (err_msg) {
                 std::ostringstream oss;
-                oss << "IIC: did not converge within max_iter (image " << (img+1) << ").";
+                oss << "LIIC: did not converge within max_iter (image " << (img+1) << ").";
                 *err_msg = oss.str();
             }
             return false;
@@ -530,7 +532,7 @@ bool interpolate_iic(const std::vector<std::string>& symbols,
 }
 
 // Distance-matrix (DM) interpolation: optimize xyz to match interpolated pairwise distances.
-// Useful as a fallback when IIC back-transform fails.
+// Useful as a fallback when LIIC back-transform fails.
 bool interpolate_dm(const std::vector<std::string>& symbols,
                     const std::vector<double>& x0,
                     const std::vector<double>& x1,
@@ -574,7 +576,7 @@ bool interpolate_dm(const std::vector<std::string>& symbols,
         std::vector<double> Dt(n*n, 0.0);
         for (int i=0;i<n*n;++i) Dt[i] = D0[i] + f*(D1[i] - D0[i]);
 
-        // Initial guess: LIIC
+        // Initial guess: LIC
         std::vector<double> x(3*n, 0.0);
         for (int k=0;k<3*n;++k) x[k] = x0[k] + f*(x1[k] - x0[k]);
 

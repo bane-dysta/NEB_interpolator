@@ -1,0 +1,40 @@
+#ifndef RMSD_ALIGN_H
+#define RMSD_ALIGN_H
+
+#include <filesystem>
+#include <string>
+
+namespace rmsd {
+
+// Locate the calc_rmsd_xyz executable.
+//
+// Search order:
+//   1) PATH (via `which`)
+//   2) Directory containing the current executable (Linux: /proc/self/exe)
+//   3) Fallback to default_path (may be relative and may not exist)
+std::string findCalcRMSDExecutable(const std::string& default_path = "./calc_rmsd_xyz");
+
+class FortranRMSDAligner {
+public:
+    explicit FortranRMSDAligner(std::string exec_path = "./calc_rmsd_xyz");
+
+    // Align mobile_file onto reference_file using calc_rmsd_xyz.
+    // Does NOT overwrite the mobile file.
+    // Returns true if the aligned output file was generated.
+    bool alignStructures(const std::string& reference_file, const std::string& mobile_file);
+
+    // Align and replace the mobile file with the aligned geometry.
+    bool alignAndReplace(const std::string& reference_file, const std::string& mobile_file);
+
+    void setExecutablePath(const std::string& path);
+
+private:
+    std::string rmsd_executable_;
+
+    // calc_rmsd_xyz supports .xyz and .gjf and writes <name>_new.<ext>
+    static std::filesystem::path inferAlignedOutputPath(const std::filesystem::path& mobile_file);
+};
+
+} // namespace rmsd
+
+#endif // RMSD_ALIGN_H

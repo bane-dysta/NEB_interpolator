@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Regression test: IIC failure should trigger DM fallback (when enabled).
+"""Regression test: LIIC failure should trigger DM fallback (when enabled).
 
-We intentionally force IIC to fail deterministically by setting a huge
+We intentionally force LIIC to fail deterministically by setting a huge
 --ev-thresh so no DLC eigenvectors are selected.
 
 We then assert that the program prints the DM-fallback message and still
@@ -44,7 +44,7 @@ def main() -> int:
         "-n",
         "3",
         "-m",
-        "iic",
+        "liic",
         "--ev-thresh",
         "1e9",
         str(init_xyz),

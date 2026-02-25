@@ -3,8 +3,25 @@
 
 #include <unordered_map>
 #include <string>
+#include <algorithm>
+#include <cctype>
+#include <stdexcept>
 
 namespace ChemData {
+
+// Raised when an element symbol (e.g. from an XYZ file) cannot be recognized.
+class UnknownElementError : public std::runtime_error {
+public:
+    explicit UnknownElementError(const std::string& msg)
+        : std::runtime_error(msg) {}
+};
+
+// Raised when an atomic number cannot be mapped back to an element symbol.
+class UnknownAtomicNumberError : public std::runtime_error {
+public:
+    explicit UnknownAtomicNumberError(const std::string& msg)
+        : std::runtime_error(msg) {}
+};
 
 // 共价半径数据集类型
 enum class RadiiType {
@@ -55,13 +72,35 @@ inline double CovalentRadii::getRadius(const std::string& element, RadiiType typ
 }
 
 inline int CovalentRadii::getAtomicNumber(const std::string& element) {
-    auto it = element_to_atomic_number_.find(element);
-    return (it != element_to_atomic_number_.end()) ? it->second : 6; // 默认返回C
+    // Trim whitespace (defensive)
+    std::string sym = element;
+    auto not_space = [](unsigned char c) { return std::isspace(c) == 0; };
+    sym.erase(sym.begin(), std::find_if(sym.begin(), sym.end(), not_space));
+    sym.erase(std::find_if(sym.rbegin(), sym.rend(), not_space).base(), sym.end());
+
+    if (sym.empty()) {
+        throw UnknownElementError("Error: empty element symbol");
+    }
+
+    // Normalize capitalization: first letter uppercase, remaining letters lowercase.
+    sym[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(sym[0])));
+    for (size_t i = 1; i < sym.size(); ++i) {
+        sym[i] = static_cast<char>(std::tolower(static_cast<unsigned char>(sym[i])));
+    }
+
+    auto it = element_to_atomic_number_.find(sym);
+    if (it == element_to_atomic_number_.end()) {
+        throw UnknownElementError("Error: unknown element symbol '" + element + "' (normalized to '" + sym + "')");
+    }
+    return it->second;
 }
 
 inline std::string CovalentRadii::getElementSymbol(int atomic_number) {
     auto it = atomic_number_to_element_.find(atomic_number);
-    return (it != atomic_number_to_element_.end()) ? it->second : "C";
+    if (it == atomic_number_to_element_.end()) {
+        throw UnknownAtomicNumberError("Error: unknown atomic number " + std::to_string(atomic_number));
+    }
+    return it->second;
 }
 
 inline bool CovalentRadii::isSupported(int atomic_number, RadiiType type) {
@@ -70,7 +109,11 @@ inline bool CovalentRadii::isSupported(int atomic_number, RadiiType type) {
 }
 
 inline bool CovalentRadii::isSupported(const std::string& element, RadiiType type) {
-    return isSupported(getAtomicNumber(element), type);
+    try {
+        return isSupported(getAtomicNumber(element), type);
+    } catch (...) {
+        return false;
+    }
 }
 
 inline const std::unordered_map<int, double>& CovalentRadii::getDataset(RadiiType type) {

@@ -42,33 +42,52 @@ else()
     set(PYTHON_EXECUTABLE python3)
 endif()
 
-# Check for Intel MKL (preferred)
-set(USE_MKL FALSE)
-if(DEFINED ENV{MKLROOT})
-    message(STATUS "Intel MKL found at: $ENV{MKLROOT}")
+# Intel MKL (optional)
+option(USE_MKL "Use Intel MKL for BLAS/LAPACK" ON)
+
+set(MKL_ROOT "")
+set(MKL_INCLUDE_DIRS "")
+set(MKL_LIBRARIES "")
+set(FORTRAN_LIBS "")
+
+set(MKL_FOUND FALSE)
+if(USE_MKL AND DEFINED ENV{MKLROOT})
     set(MKL_ROOT $ENV{MKLROOT})
-    set(USE_MKL TRUE)
-    
-    # Intel MKL include directory
-    set(MKL_INCLUDE_DIRS ${MKL_ROOT}/include)
-    
-    # Intel MKL libraries
-    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-        set(MKL_LIBRARIES
-            ${MKL_ROOT}/lib/intel64/libmkl_intel_lp64.so
-            ${MKL_ROOT}/lib/intel64/libmkl_intel_thread.so
-            ${MKL_ROOT}/lib/intel64/libmkl_core.so
-            -liomp5 -lpthread -lm -ldl
-        )
-    elseif(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
-        set(MKL_LIBRARIES
-            ${MKL_ROOT}/lib/libmkl_intel_lp64.dylib
-            ${MKL_ROOT}/lib/libmkl_intel_thread.dylib
-            ${MKL_ROOT}/lib/libmkl_core.dylib
-            -liomp5 -lpthread -lm -ldl
-        )
+    if(EXISTS "${MKL_ROOT}/include/mkl.h")
+        if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+            set(_MKL_LIB_DIR "${MKL_ROOT}/lib/intel64")
+            if(EXISTS "${_MKL_LIB_DIR}/libmkl_core.so" AND
+               EXISTS "${_MKL_LIB_DIR}/libmkl_intel_lp64.so" AND
+               EXISTS "${_MKL_LIB_DIR}/libmkl_intel_thread.so")
+                set(MKL_LIBRARIES
+                    ${_MKL_LIB_DIR}/libmkl_intel_lp64.so
+                    ${_MKL_LIB_DIR}/libmkl_intel_thread.so
+                    ${_MKL_LIB_DIR}/libmkl_core.so
+                    -liomp5 -lpthread -lm -ldl
+                )
+                set(MKL_FOUND TRUE)
+            endif()
+        elseif(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+            set(_MKL_LIB_DIR "${MKL_ROOT}/lib")
+            if(EXISTS "${_MKL_LIB_DIR}/libmkl_core.dylib" AND
+               EXISTS "${_MKL_LIB_DIR}/libmkl_intel_lp64.dylib" AND
+               EXISTS "${_MKL_LIB_DIR}/libmkl_intel_thread.dylib")
+                set(MKL_LIBRARIES
+                    ${_MKL_LIB_DIR}/libmkl_intel_lp64.dylib
+                    ${_MKL_LIB_DIR}/libmkl_intel_thread.dylib
+                    ${_MKL_LIB_DIR}/libmkl_core.dylib
+                    -liomp5 -lpthread -lm -ldl
+                )
+                set(MKL_FOUND TRUE)
+            endif()
+        endif()
     endif()
-    
+endif()
+
+if(MKL_FOUND)
+    message(STATUS "Intel MKL enabled at: ${MKL_ROOT}")
+    set(MKL_INCLUDE_DIRS ${MKL_ROOT}/include)
+
     # Use MKL compiler flags if using Intel compilers
     if(CMAKE_Fortran_COMPILER_ID MATCHES "Intel")
         set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -mkl")
@@ -76,13 +95,15 @@ if(DEFINED ENV{MKLROOT})
     else()
         set(FORTRAN_LIBS ${MKL_LIBRARIES})
     endif()
-    
     if(CMAKE_CXX_COMPILER_ID MATCHES "Intel")
         set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mkl")
     endif()
-    
 else()
-    message(STATUS "Intel MKL not found, using system BLAS/LAPACK")
+    if(USE_MKL)
+        message(STATUS "Intel MKL requested (USE_MKL=ON) but not found; using system BLAS/LAPACK")
+    else()
+        message(STATUS "Intel MKL disabled (USE_MKL=OFF); using system BLAS/LAPACK")
+    endif()
     set(MKL_LIBRARIES ${BLAS_LIBRARIES} ${LAPACK_LIBRARIES})
     set(MKL_INCLUDE_DIRS "")
     set(FORTRAN_LIBS ${MKL_LIBRARIES})
@@ -91,13 +112,23 @@ endif()
 # Create directories
 file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/include)
+file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/examples)
 
 # Set source directory
 set(SRC_DIR ${CMAKE_SOURCE_DIR}/src)
 
 # Check if source files exist
-if(NOT EXISTS ${SRC_DIR}/neb_interpolator.h)
-    message(FATAL_ERROR "Cannot find ${SRC_DIR}/neb_interpolator.h")
+if(NOT EXISTS ${SRC_DIR}/neb_driver.h)
+    message(FATAL_ERROR "Cannot find ${SRC_DIR}/neb_driver.h")
+endif()
+if(NOT EXISTS ${SRC_DIR}/neb_driver.cpp)
+    message(FATAL_ERROR "Cannot find ${SRC_DIR}/neb_driver.cpp")
+endif()
+if(NOT EXISTS ${SRC_DIR}/rmsd_align.h)
+    message(FATAL_ERROR "Cannot find ${SRC_DIR}/rmsd_align.h")
+endif()
+if(NOT EXISTS ${SRC_DIR}/rmsd_align.cpp)
+    message(FATAL_ERROR "Cannot find ${SRC_DIR}/rmsd_align.cpp")
 endif()
 if(NOT EXISTS ${SRC_DIR}/calc_rmsd_xyz.f90)
     message(FATAL_ERROR "Cannot find ${SRC_DIR}/calc_rmsd_xyz.f90")
@@ -109,9 +140,39 @@ if(NOT EXISTS ${SRC_DIR}/neb_interpolator.cpp)
     message(FATAL_ERROR "Cannot find ${SRC_DIR}/neb_interpolator.cpp")
 endif()
 
+if(NOT EXISTS ${SRC_DIR}/neb_engine.h)
+    message(FATAL_ERROR "Cannot find ${SRC_DIR}/neb_engine.h")
+endif()
+if(NOT EXISTS ${SRC_DIR}/neb_engine.cpp)
+    message(FATAL_ERROR "Cannot find ${SRC_DIR}/neb_engine.cpp")
+endif()
+if(NOT EXISTS ${SRC_DIR}/neb_core.h)
+    message(FATAL_ERROR "Cannot find ${SRC_DIR}/neb_core.h")
+endif()
+if(NOT EXISTS ${SRC_DIR}/neb_core.cpp)
+    message(FATAL_ERROR "Cannot find ${SRC_DIR}/neb_core.cpp")
+endif()
+
 # Copy header file to build directory
-configure_file(${SRC_DIR}/neb_interpolator.h 
-               ${CMAKE_BINARY_DIR}/include/neb_interpolator.h 
+configure_file(${SRC_DIR}/neb_driver.h
+               ${CMAKE_BINARY_DIR}/include/neb_driver.h
+               COPYONLY)
+configure_file(${SRC_DIR}/rmsd_align.h
+               ${CMAKE_BINARY_DIR}/include/rmsd_align.h
+               COPYONLY)
+
+# Copy shared headers to build directory
+configure_file(${SRC_DIR}/geometry.h
+               ${CMAKE_BINARY_DIR}/include/geometry.h
+               COPYONLY)
+configure_file(${SRC_DIR}/util.h
+               ${CMAKE_BINARY_DIR}/include/util.h
+               COPYONLY)
+configure_file(${SRC_DIR}/neb_engine.h
+               ${CMAKE_BINARY_DIR}/include/neb_engine.h
+               COPYONLY)
+configure_file(${SRC_DIR}/neb_core.h
+               ${CMAKE_BINARY_DIR}/include/neb_core.h
                COPYONLY)
 
 # Include directories
@@ -123,22 +184,34 @@ endif()
 
 # ========== Executables ==========
 
+# Shared C++ library (driver + NEB core/engine + interpolation backends)
+add_library(neb_lib
+    ${SRC_DIR}/neb_driver.cpp
+    ${SRC_DIR}/rmsd_align.cpp
+    ${SRC_DIR}/neb_engine.cpp
+    ${SRC_DIR}/neb_core.cpp
+    ${SRC_DIR}/internal_ic.cpp
+    ${SRC_DIR}/zmat/covalent_radii.cpp
+)
+
+set_target_properties(neb_lib PROPERTIES
+    POSITION_INDEPENDENT_CODE ON
+)
+
 # 1. Fortran RMSD calculator executable
 add_executable(calc_rmsd_xyz ${SRC_DIR}/calc_rmsd_xyz.f90)
 target_link_libraries(calc_rmsd_xyz ${FORTRAN_LIBS})
 
 # 2. C++ XYZ Geometry Analyzer (Enhanced version)
 add_executable(xyzgeom ${SRC_DIR}/xyzgeom.cpp)
+target_link_libraries(xyzgeom neb_lib)
 set_target_properties(xyzgeom PROPERTIES 
     COMPILE_FLAGS "-I${CMAKE_BINARY_DIR}/include -I${SRC_DIR}"
 )
 
 # 3. C++ NEB Interpolator standalone executable
-add_executable(neb_interpolator 
-    ${SRC_DIR}/neb_interpolator.cpp
-    ${SRC_DIR}/internal_ic.cpp
-    ${SRC_DIR}/zmat/covalent_radii.cpp
-)
+add_executable(neb_interpolator ${SRC_DIR}/neb_interpolator.cpp)
+target_link_libraries(neb_interpolator neb_lib)
 set_target_properties(neb_interpolator PROPERTIES 
     COMPILE_FLAGS "-I${CMAKE_BINARY_DIR}/include -I${SRC_DIR}"
 )
@@ -240,26 +313,26 @@ add_custom_target(test_xyzgeom
     COMMENT "Testing XYZ geometry analyzer"
 )
 
-# Test NEB interpolation
-add_custom_target(test_neb
+# Test LIC interpolation (Cartesian linear)
+add_custom_target(test_lic
     COMMAND ${CMAKE_BINARY_DIR}/bin/neb_interpolator 
-        -n 3 -m liic
+        -n 3 -m lic
         ${CMAKE_BINARY_DIR}/examples/water.xyz 
         ${CMAKE_BINARY_DIR}/examples/water_rotated.xyz
     DEPENDS neb_interpolator calc_rmsd_xyz
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/bin
-    COMMENT "Testing NEB interpolation"
+    COMMENT "Testing LIC interpolation"
 )
 
-# Test IIC interpolation (water)
-add_custom_target(test_iic
+# Test LIIC interpolation (water)
+add_custom_target(test_liic
     COMMAND ${CMAKE_BINARY_DIR}/bin/neb_interpolator
-        --no-align -n 3 -m iic
+        --no-align -n 3 -m liic
         ${CMAKE_BINARY_DIR}/examples/water.xyz
         ${CMAKE_BINARY_DIR}/examples/water_rotated.xyz
     DEPENDS neb_interpolator
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/bin
-    COMMENT "Testing IIC interpolation with water molecules"
+    COMMENT "Testing LIIC interpolation with water molecules"
 )
 
 # Test DM interpolation (water)
@@ -284,7 +357,7 @@ add_custom_target(test_rmsd_range
     COMMENT "Testing calc_rmsd_xyz with explicit atom ranges"
 )
 
-# Test IIC->DM fallback path (forced IIC failure via --ev-thresh)
+# Test LIIC->DM fallback path (forced LIIC failure via --ev-thresh)
 add_custom_target(test_dm_fallback
     COMMAND ${PYTHON_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/test_dm_fallback.py
         ${CMAKE_BINARY_DIR}/bin/neb_interpolator
@@ -292,7 +365,7 @@ add_custom_target(test_dm_fallback
         ${CMAKE_BINARY_DIR}/examples/bondshift_final.xyz
     DEPENDS neb_interpolator
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/bin
-    COMMENT "Testing DM fallback when IIC fails"
+    COMMENT "Testing DM fallback when LIIC fails"
 )
 
 # Test external engine interface with a mock engine that outputs zero gradients
@@ -308,9 +381,29 @@ add_custom_target(test_external_engine
 )
 
 
+# Minimal C++ unit test for NEB core (assembleNEBForces)
+add_executable(neb_core_test
+    ${CMAKE_SOURCE_DIR}/tests/test_neb_core.cpp
+    ${SRC_DIR}/neb_core.cpp
+)
+set_target_properties(neb_core_test PROPERTIES
+    COMPILE_FLAGS "-I${CMAKE_BINARY_DIR}/include -I${SRC_DIR}"
+)
+set_target_properties(neb_core_test
+    PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+)
+
+add_custom_target(test_neb_core
+    COMMAND ${CMAKE_BINARY_DIR}/bin/neb_core_test
+    DEPENDS neb_core_test
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+    COMMENT "Testing NEB core (assembleNEBForces)"
+)
+
 # Run all tests
 add_custom_target(test_all
-    DEPENDS test_rmsd test_rmsd_range test_xyzgeom test_neb test_iic test_dm test_dm_fallback test_external_engine
+    DEPENDS test_rmsd test_rmsd_range test_xyzgeom test_lic test_liic test_dm test_dm_fallback test_external_engine test_neb_core
     COMMENT "Running all tests"
 )
 
@@ -320,8 +413,36 @@ install(TARGETS calc_rmsd_xyz xyzgeom neb_interpolator
     RUNTIME DESTINATION bin
 )
 
-install(FILES ${SRC_DIR}/neb_interpolator.h
+install(FILES ${SRC_DIR}/neb_driver.h
     DESTINATION include
+)
+
+install(FILES ${SRC_DIR}/rmsd_align.h
+    DESTINATION include
+)
+
+install(FILES ${SRC_DIR}/neb_engine.h
+    DESTINATION include
+)
+
+install(FILES ${SRC_DIR}/neb_core.h
+    DESTINATION include
+)
+
+install(FILES ${SRC_DIR}/internal_ic.h
+    DESTINATION include
+)
+
+install(FILES ${SRC_DIR}/geometry.h
+    DESTINATION include
+)
+
+install(FILES ${SRC_DIR}/util.h
+    DESTINATION include
+)
+
+install(FILES ${SRC_DIR}/zmat/covalent_radii.h
+    DESTINATION include/zmat
 )
 
 install(DIRECTORY ${CMAKE_BINARY_DIR}/examples/
@@ -339,7 +460,7 @@ message(STATUS "C++ compiler: ${CMAKE_CXX_COMPILER}")
 message(STATUS "C++ flags: ${CMAKE_CXX_FLAGS}")
 message(STATUS "Fortran compiler: ${CMAKE_Fortran_COMPILER}")
 message(STATUS "Fortran flags: ${CMAKE_Fortran_FLAGS}")
-if(USE_MKL)
+if(MKL_FOUND)
     message(STATUS "BLAS/LAPACK: Intel MKL at ${MKL_ROOT}")
 else()
     message(STATUS "BLAS/LAPACK: System libraries")
@@ -350,7 +471,17 @@ message(STATUS "Source files:")
 message(STATUS "  ${SRC_DIR}/xyzgeom.cpp")
 message(STATUS "  ${SRC_DIR}/calc_rmsd_xyz.f90")
 message(STATUS "  ${SRC_DIR}/neb_interpolator.cpp")
-message(STATUS "  ${SRC_DIR}/neb_interpolator.h")
+message(STATUS "  ${SRC_DIR}/neb_driver.cpp")
+message(STATUS "  ${SRC_DIR}/rmsd_align.cpp")
+message(STATUS "  ${SRC_DIR}/internal_ic.cpp")
+message(STATUS "  ${SRC_DIR}/neb_engine.cpp")
+message(STATUS "  ${SRC_DIR}/neb_core.cpp")
+message(STATUS "  ${SRC_DIR}/neb_driver.h")
+message(STATUS "  ${SRC_DIR}/rmsd_align.h")
+message(STATUS "  ${SRC_DIR}/internal_ic.h")
+message(STATUS "  ${SRC_DIR}/neb_engine.h")
+message(STATUS "  ${SRC_DIR}/neb_core.h")
+message(STATUS "  ${SRC_DIR}/zmat/covalent_radii.h")
 message(STATUS "")
 message(STATUS "Executables will be built in: ${CMAKE_BINARY_DIR}/bin")
 message(STATUS "===========================")
@@ -364,9 +495,14 @@ add_custom_target(usage
     COMMAND echo "  calc_rmsd_xyz  - Build Fortran RMSD calculator"
     COMMAND echo "  neb_interpolator - Build standalone NEB interpolator"
     COMMAND echo "  test_all       - Run all tests"
+    COMMAND echo "  test_neb_core  - Run NEB core unit tests"
     COMMAND echo "  test_rmsd      - Test RMSD alignment"
     COMMAND echo "  test_xyzgeom   - Test geometry analyzer"
-    COMMAND echo "  test_neb       - Test NEB interpolation"
+    COMMAND echo "  test_lic       - Test LIC interpolation"
+    COMMAND echo "  test_liic      - Test LIIC interpolation"
+    COMMAND echo "  test_dm        - Test DM interpolation"
+    COMMAND echo "  test_dm_fallback - Test LIIC -> DM fallback"
+    COMMAND echo "  test_external_engine - Test external engine interface"
     COMMAND echo "  install        - Install executables and files"
     COMMAND echo "  clean          - Clean build files"
     COMMAND echo ""
@@ -385,7 +521,7 @@ add_custom_target(clean_all
     COMMAND ${CMAKE_COMMAND} -E remove_directory ${CMAKE_BINARY_DIR}/bin
     COMMAND ${CMAKE_COMMAND} -E remove_directory ${CMAKE_BINARY_DIR}/include
     COMMAND ${CMAKE_COMMAND} -E remove_directory ${CMAKE_BINARY_DIR}/examples
-    COMMAND ${CMAKE_COMMAND} -E remove ${CMAKE_BINARY_DIR}/*.xyz 2>/dev/null || true
+    COMMAND ${CMAKE_COMMAND} -DBINARY_DIR=${CMAKE_BINARY_DIR} -P ${CMAKE_SOURCE_DIR}/cmake/clean_xyz.cmake
     COMMENT "Cleaning all generated files"
     VERBATIM
 )

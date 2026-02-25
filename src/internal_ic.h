@@ -10,7 +10,7 @@
 
 #include "zmat/covalent_radii.h"
 
-// A lightweight, dependency-free internal-coordinate (IIC/DLC-style) and
+// A lightweight, dependency-free internal-coordinate (LIIC/DLC-style) and
 // distance-matrix (DM) interpolator, inspired by GSM starting_string / starting_string_dm.
 //
 // Notes:
@@ -45,6 +45,10 @@ struct IICOptions {
     // Diagnostics
     int verbose = 0;
 };
+
+// Naming: LIIC = Linear Interpolation in Internal Coordinates
+using LIICOptions = IICOptions;
+
 
 struct DMOptions {
     int max_iter = 800;
@@ -253,6 +257,18 @@ bool interpolate_iic(const std::vector<std::string>& symbols,
                      std::vector<std::vector<double>>& out_images,
                      const IICOptions& opt,
                      std::string* err_msg);
+
+// New naming wrapper: LIIC (internal coordinates)
+static inline bool interpolate_liic(const std::vector<std::string>& symbols,
+                                   const std::vector<double>& x0,
+                                   const std::vector<double>& x1,
+                                   int nimages,
+                                   std::vector<std::vector<double>>& out_images,
+                                   const LIICOptions& opt,
+                                   std::string* err_msg) {
+    return interpolate_iic(symbols, x0, x1, nimages, out_images, opt, err_msg);
+}
+
 bool interpolate_dm(const std::vector<std::string>& symbols,
                     const std::vector<double>& x0,
                     const std::vector<double>& x1,
