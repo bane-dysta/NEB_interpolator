@@ -354,10 +354,10 @@ public:
 
         bool useLIIC = (m == "liic" || m == "i");
         
-        std::cout << "Enter output prefix (default: neb_): ";
+        std::cout << "Enter output prefix (default: intrp_): ";
         std::string prefix;
         std::getline(std::cin, prefix);
-        if (prefix.empty()) prefix = "neb_";
+        if (prefix.empty()) prefix = "intrp_";
         
         // Shared NEB / interpolation driver (same implementation as neb_interpolator)
         neb::NEBDriver driver(numImages);
@@ -386,6 +386,19 @@ public:
             if (!driver.run(neb::Method::LIC, &err)) {
                 std::cerr << (err.empty() ? "Error: LIC failed" : err) << std::endl;
                 return;
+            }
+        }
+
+        if (useLIIC) {
+            // NEBDriver::run(Method::LIIC) may fall back to DM/LIC while still returning success.
+            // The per-image comment encodes the initializer actually used.
+            const auto& imgs = driver.images();
+            if (!imgs.empty()) {
+                const std::string& c0 = imgs.front().comment;
+                if (c0.rfind("LIIC", 0) != 0) {
+                    std::cerr << "Warning: requested LIIC, but initialization used fallback (" << c0 << ")."
+                              << std::endl;
+                }
             }
         }
 

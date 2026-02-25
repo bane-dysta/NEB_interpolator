@@ -2,6 +2,7 @@
 #include <iostream>
 #include <algorithm>
 #include <numeric>
+#include <iomanip>
 
 namespace ICInterp {
 
@@ -390,14 +391,36 @@ bool interpolate_iic(const std::vector<std::string>& symbols,
 
         std::vector<double> q_cur;
 
+        double last_rms = std::numeric_limits<double>::infinity();
+        int it_converged = -1;
+
+        if (opt.verbose >= 1) {
+            std::cerr << "    [LIIC] image " << (img + 1) << "/" << nimages
+                      << "  f=" << f
+                      << "  nprim=" << m
+                      << "  tol=" << opt.tol
+                      << "  max_iter=" << opt.max_iter
+                      << std::endl;
+        }
+
         bool converged = false;
         for (int it=0; it<opt.max_iter; ++it) {
             compute_primitives(x, prims, q_cur);
             double rms = rms_residual(q_target, q_cur, prims);
-            if (opt.verbose >= 2) {
-                // no iostream here to keep header light; skip detailed printing
+            last_rms = rms;
+
+            // Verbose levels:
+            //   0: silent
+            //   1: print every ~5 iterations (plus first/last/converged)
+            //   2: print every iteration
+            if (opt.verbose >= 2 ||
+                (opt.verbose >= 1 && (it == 0 || ((it + 1) % 5 == 0) || rms < opt.tol))) {
+                std::cerr << "      iter " << it
+                          << "  rms=" << std::scientific << rms << std::defaultfloat
+                          << std::endl;
             }
-            if (rms < opt.tol) { converged = true; break; }
+
+            if (rms < opt.tol) { converged = true; it_converged = it; break; }
 
             // Finite difference Bp
             std::vector<double> Bp;
@@ -454,7 +477,14 @@ bool interpolate_iic(const std::vector<std::string>& symbols,
                 ++nsel;
             }
             if (nsel == 0) {
-                if (err_msg) *err_msg = "LIIC: no DLC eigenvectors selected (ev_thresh too large?).";
+                if (err_msg) {
+                    double max_eval = 0.0;
+                    for (double v : evals) max_eval = std::max(max_eval, v);
+                    std::ostringstream oss;
+                    oss << "LIIC: no DLC eigenvectors selected (ev_thresh=" << opt.ev_thresh
+                        << ", max_eval=" << max_eval << ").";
+                    *err_msg = oss.str();
+                }
                 return false;
             }
 
@@ -475,6 +505,13 @@ bool interpolate_iic(const std::vector<std::string>& symbols,
             double scale_step = 1.0;
             if (max_disp > opt.max_cart_step && max_disp > 1e-18) {
                 scale_step = opt.max_cart_step / max_disp;
+            }
+
+            if (opt.verbose >= 2) {
+                std::cerr << "        nsel=" << nsel
+                          << "  max_disp=" << max_disp
+                          << "  step_scale=" << scale_step
+                          << std::endl;
             }
 
             // Simple line search: ensure residual decreases
@@ -508,7 +545,10 @@ bool interpolate_iic(const std::vector<std::string>& symbols,
             if (!accepted) {
                 if (err_msg) {
                     std::ostringstream oss;
-                    oss << "LIIC: back-transform diverged (image " << (img+1) << ", iter " << it << ").";
+                    oss << "LIIC: back-transform diverged (image " << (img+1)
+                        << ", iter " << it
+                        << ", last_rms=" << last_rms
+                        << ").";
                     *err_msg = oss.str();
                 }
                 return false;
@@ -518,10 +558,21 @@ bool interpolate_iic(const std::vector<std::string>& symbols,
         if (!converged) {
             if (err_msg) {
                 std::ostringstream oss;
-                oss << "LIIC: did not converge within max_iter (image " << (img+1) << ").";
+                oss << "LIIC: did not converge within max_iter (image " << (img+1)
+                    << ", last_rms=" << last_rms
+                    << ", tol=" << opt.tol
+                    << ", max_iter=" << opt.max_iter
+                    << ").";
                 *err_msg = oss.str();
             }
             return false;
+        }
+
+        if (opt.verbose >= 1) {
+            std::cerr << "    [LIIC] image " << (img + 1)
+                      << " converged in " << (it_converged + 1) << " iterations"
+                      << "  final_rms=" << std::scientific << last_rms << std::defaultfloat
+                      << std::endl;
         }
 
         out_images[img] = x;

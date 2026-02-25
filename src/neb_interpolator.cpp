@@ -28,6 +28,7 @@ static void printUsage(const char* program_name) {
         << "  --liic-tol T             RMS primitive residual tolerance (default: 1e-4)\n"
         << "  --liic-damp D            Damping added to eigenvalues (default: 1e-8)\n"
         << "  --liic-max-step S        Max cartesian step per iteration (default: 0.20)\n"
+        << "  --liic-verbose V         LIIC verbosity: 0=silent, 1=per-image, 2=per-iter (default: 0)\n"
         << "\nDM options (used as fallback when LIIC fails, or -m dm):\n"
         << "  --dm-maxiter N           Max DM iterations (default: 800)\n"
         << "  --dm-step S              DM gradient step size (default: 5e-3)\n"
@@ -229,6 +230,12 @@ int main(int argc, char* argv[]) {
                 std::cerr << "Error: --liic-max-step must be positive" << std::endl;
                 return 1;
             }
+            continue;
+        }
+
+        if (std::strcmp(argv[i], "--liic-verbose") == 0 && i + 1 < argc) {
+            liic_opt.verbose = std::atoi(argv[++i]);
+            if (liic_opt.verbose < 0) liic_opt.verbose = 0;
             continue;
         }
 
@@ -461,6 +468,7 @@ int main(int argc, char* argv[]) {
             << ", liic_tol=" << liic_opt.tol
             << ", liic_damp=" << liic_opt.damp
             << ", liic_max_step=" << liic_opt.max_cart_step
+            << ", liic_verbose=" << liic_opt.verbose
             << "\n";
         std::cout << "DM fallback: " << (dm_fallback ? "enabled" : "disabled") << "\n";
     }

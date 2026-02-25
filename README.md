@@ -243,7 +243,7 @@ DM 参数：
 
 ```bash
 # 强制不用 MKL
-cmake .. -DUSE_MKL=OFF
+cmake .. -DUSE_MKL=OFF -DBLA_VENDOR=Generic
 ```
 
 ### 2) 找不到 calc_rmsd_xyz
