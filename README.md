@@ -122,7 +122,7 @@ MolecularGeometryTools/
 核心菜单（节选）：
 
 - 13. 与第二个 XYZ 文件对齐（RMSD，对齐工具为 `calc_rmsd_xyz`）
-- 14. 与第二个 XYZ 进行路径生成（LIC 或 NEB）
+- 14. 与第二个 XYZ 进行路径生成
 
 命令行模式示例：
 

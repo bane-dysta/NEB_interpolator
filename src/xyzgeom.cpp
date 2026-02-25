@@ -313,9 +313,9 @@ public:
         (void)ec;
     }
 
-    // Function 14: NEB interpolation with second XYZ file
+    // Function 14: Path interpolation with second XYZ file (LIC / LIIC)
     void performNEBWithSecondXYZ() {
-        std::cout << "Enter final XYZ filename for NEB interpolation: ";
+        std::cout << "Enter final XYZ filename for interpolation: ";
         std::string finalFile;
         std::getline(std::cin, finalFile);
         
@@ -344,9 +344,15 @@ public:
             numImages = 5;
         }
         
-        std::cout << "Use NEB (n) or LIC (l) method? (default n): ";
+        std::cout << "Choose method LIC or LIIC (default: LIC): ";
         std::getline(std::cin, input);
-        bool useNEB = (input.empty() || input == "n" || input == "N");
+
+        // Normalize input: lowercase + strip whitespace
+        std::string m = input;
+        m.erase(std::remove_if(m.begin(), m.end(), [](unsigned char c){ return std::isspace(c) != 0; }), m.end());
+        std::transform(m.begin(), m.end(), m.begin(), [](unsigned char c){ return static_cast<char>(std::tolower(c)); });
+
+        bool useLIIC = (m == "liic" || m == "i");
         
         std::cout << "Enter output prefix (default: neb_): ";
         std::string prefix;
@@ -371,9 +377,9 @@ public:
             return;
         }
 
-        if (useNEB) {
-            if (!driver.run(neb::Method::NEB, &err)) {
-                std::cerr << (err.empty() ? "Error: NEB failed" : err) << std::endl;
+        if (useLIIC) {
+            if (!driver.run(neb::Method::LIIC, &err)) {
+                std::cerr << (err.empty() ? "Error: LIIC failed" : err) << std::endl;
                 return;
             }
         } else {
@@ -388,7 +394,7 @@ public:
             return;
         }
 
-        std::cout << "NEB interpolation completed successfully!" << std::endl;
+        std::cout << "Interpolation completed successfully!" << std::endl;
     }
     
     // Function 1: Calculate distance and vector between 2 atoms
@@ -847,7 +853,7 @@ public:
         std::cout << "11. Load new XYZ file" << std::endl;
         std::cout << "12. Toggle distance unit (Bohr/Angstrom)" << std::endl;
         std::cout << "13. Align with second XYZ file (RMSD)" << std::endl;
-        std::cout << "14. NEB interpolation with second XYZ file" << std::endl;
+        std::cout << "14. Interpolation with second XYZ file (LIC/LIIC)" << std::endl;
         std::cout << "0.  Exit" << std::endl;
         std::cout << "\nEnter choice: ";
     }
