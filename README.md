@@ -1,4 +1,4 @@
-*README由Claude 4.0生成（早期版本），可查看帮助；彩虹屁勿信。*
+*README由GPT 5.2，可查看帮助；彩虹屁勿信。*
 
 # 分子几何工具
 
@@ -11,18 +11,6 @@
 - **xyzgeom**：交互式/命令行分子几何分析器（距离/角度/二面角/导出/镜像/对齐/插值等）。
 - **calc_rmsd_xyz**：Fortran/LAPACK 实现的 RMSD 计算与结构对齐（生成 `*_new.xyz`）。
 - **neb_interpolator**：反应路径插值与 NEB（Nudged Elastic Band）优化的命令行工具。
-
-## 术语与方法
-
-为避免历史命名包袱，项目内固定使用以下术语：
-
-- **LIC**：Cartesian linear interpolation（笛卡尔坐标线性插值）
-- **LIIC**：internal-coordinate interpolation（基于 DLC/Delocalized Internal Coordinates 的内坐标插值）
-- **DM**：distance-matrix interpolation（距离矩阵插值）
-- **NEB**：NEB 优化（默认用 LIC 初始化路径）
-- **NEB-LIIC**：NEB 优化（用 LIIC 初始化路径）
-
-回退策略（默认开启）：**LIIC 失败 → DM 回退 → LIC 回退**。
 
 ## 功能特性
 
@@ -47,6 +35,11 @@
 ### neb_interpolator
 
 - 插值/优化方法：LIC / LIIC / DM / NEB / NEB-LIIC
+  - **LIC**：Cartesian linear interpolation（笛卡尔坐标线性插值）
+  - **LIIC**：internal-coordinate interpolation（基于 DLC/Delocalized Internal Coordinates 的内坐标插值）
+  - **DM**：distance-matrix interpolation（距离矩阵插值）
+  - **NEB**：NEB 优化（默认用 LIC 初始化路径）
+  - **NEB-LIIC**：NEB 优化（用 LIIC 初始化路径）
 - LIIC 自动回退：LIIC → DM → LIC
 - 插值/NEB 前可选端点对齐（默认开启；用 `calc_rmsd_xyz`）
 - 支持外部引擎模式（NEB/NEB-LIIC 每个 cycle 调用外部程序返回梯度/力）
@@ -70,7 +63,7 @@
 CMake 提供 `USE_MKL` 选项：
 
 - `-DUSE_MKL=ON`（默认）：若 `MKLROOT` 可用且库文件存在，则启用 MKL
-- `-DUSE_MKL=OFF`：强制使用系统 BLAS/LAPACK
+- `-DUSE_MKL=OFF`：使用系统 BLAS/LAPACK
 
 ## 构建与安装
 
@@ -114,7 +107,7 @@ MolecularGeometryTools/
 └── tests/
 ```
 
-> 说明：`src/zmat/` 下除 `covalent_radii` 外还包含一些实验性/未接入主程序的代码文件（如 `zmat.f90`、`zmatrix_generator.cpp`）。
+> `src/zmat/` 下除 `covalent_radii` 外还包含一些实验性/未接入主程序的代码文件（如 `zmat.f90`、`zmatrix_generator.cpp`）。
 
 ## 使用方法
 
