@@ -1,10 +1,12 @@
 #include "rmsd_align.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <iostream>
 #include <limits.h>
 #include <system_error>
+#include <vector>
 
 #include <sys/wait.h>
 #include <unistd.h>
@@ -14,9 +16,29 @@
 namespace rmsd {
 
 std::string findCalcRMSDExecutable(const std::string& default_path) {
-    // 1) PATH
-    {
-        const std::string command = "which calc_rmsd_xyz 2>/dev/null";
+    auto isExecutable = [](const std::string& path) -> bool {
+        return !path.empty() && access(path.c_str(), X_OK) == 0;
+    };
+
+    const std::string default_name = std::filesystem::path(default_path).filename().string();
+    std::vector<std::string> backend_names;
+    if (!default_name.empty()) {
+        backend_names.push_back(default_name);
+    }
+    for (const std::string& candidate : {std::string("calc_rmsd_xyz"), std::string("allign_lapack"), std::string("allign_eigen")}) {
+        if (std::find(backend_names.begin(), backend_names.end(), candidate) == backend_names.end()) {
+            backend_names.push_back(candidate);
+        }
+    }
+
+    // 0) Explicit default path, if it already points to an executable.
+    if (isExecutable(default_path)) {
+        return default_path;
+    }
+
+    // 1) PATH lookup in fallback order.
+    for (const std::string& backend : backend_names) {
+        const std::string command = "which " + backend + " 2>/dev/null";
         FILE* pipe = popen(command.c_str(), "r");
         if (pipe != nullptr) {
             char buffer[PATH_MAX];
@@ -26,7 +48,7 @@ std::string findCalcRMSDExecutable(const std::string& default_path) {
                 if (!path.empty() && path.back() == '\n') {
                     path.pop_back();
                 }
-                if (!path.empty()) {
+                if (isExecutable(path)) {
                     return path;
                 }
             } else {
@@ -35,7 +57,7 @@ std::string findCalcRMSDExecutable(const std::string& default_path) {
         }
     }
 
-    // 2) Same directory as current executable (Linux)
+    // 2) Same directory as current executable (Linux), also in fallback order.
     {
         char exe_path[PATH_MAX];
         ssize_t len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
@@ -45,15 +67,17 @@ std::string findCalcRMSDExecutable(const std::string& default_path) {
             size_t last_slash = exe_dir.find_last_of('/');
             if (last_slash != std::string::npos) {
                 exe_dir = exe_dir.substr(0, last_slash + 1);
-                std::string candidate = exe_dir + "calc_rmsd_xyz";
-                if (access(candidate.c_str(), X_OK) == 0) {
-                    return candidate;
+                for (const std::string& backend : backend_names) {
+                    const std::string candidate = exe_dir + backend;
+                    if (isExecutable(candidate)) {
+                        return candidate;
+                    }
                 }
             }
         }
     }
 
-    // 3) Fallback
+    // 3) Final fallback keeps the historical default for caller-side logging/errors.
     return default_path;
 }
 
@@ -80,11 +104,11 @@ bool FortranRMSDAligner::alignStructures(const std::string& reference_file, cons
                                 util::shellQuote(reference_file) + " " +
                                 util::shellQuote(mobile_file);
 
-    std::cout << "  Running Fortran RMSD alignment: " << command << std::endl;
+    std::cout << "  Running RMSD alignment backend: " << command << std::endl;
 
     util::CommandResult result = util::runCommand(command);
     if (!(result.exited && result.exit_code == 0)) {
-        std::cerr << "  Error: Fortran RMSD alignment failed (" << util::formatCommandFailure(result) << ")" << std::endl;
+        std::cerr << "  Error: RMSD alignment backend failed (" << util::formatCommandFailure(result) << ")" << std::endl;
         return false;
     }
 

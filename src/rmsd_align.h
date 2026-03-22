@@ -6,12 +6,17 @@
 
 namespace rmsd {
 
-// Locate the calc_rmsd_xyz executable.
+// Locate an available alignment+RMSD backend executable.
 //
-// Search order:
-//   1) PATH (via `which`)
-//   2) Directory containing the current executable (Linux: /proc/self/exe)
-//   3) Fallback to default_path (may be relative and may not exist)
+// Fallback order:
+//   1) calc_rmsd_xyz
+//   2) allign_lapack
+//   3) allign_eigen
+//
+// For each backend name, search order is:
+//   a) PATH (via `which`)
+//   b) Directory containing the current executable (Linux: /proc/self/exe)
+//   c) Explicit default_path (checked first if non-empty)
 std::string findCalcRMSDExecutable(const std::string& default_path = "./calc_rmsd_xyz");
 
 class FortranRMSDAligner {

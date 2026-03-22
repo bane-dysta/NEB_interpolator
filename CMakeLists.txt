@@ -1,5 +1,7 @@
 cmake_minimum_required(VERSION 3.10)
-project(MolecularGeometryTools LANGUAGES CXX Fortran)
+project(MolecularGeometryTools LANGUAGES CXX)
+
+include(CheckLanguage)
 
 # Set C++ standard
 set(CMAKE_CXX_STANDARD 17)
@@ -21,18 +23,22 @@ elseif(CMAKE_CXX_COMPILER_ID STREQUAL "Intel")
     set(CMAKE_CXX_FLAGS_DEBUG "-g -O0")
 endif()
 
-if(CMAKE_Fortran_COMPILER_ID STREQUAL "GNU")
-    set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -Wall -Wextra")
-    set(CMAKE_Fortran_FLAGS_RELEASE "-O3 -DNDEBUG")
-    set(CMAKE_Fortran_FLAGS_DEBUG "-g -O0")
-elseif(CMAKE_Fortran_COMPILER_ID MATCHES "Intel")
-    set(CMAKE_Fortran_FLAGS_RELEASE "-O3 -DNDEBUG")
-    set(CMAKE_Fortran_FLAGS_DEBUG "-g -O0")
+# Optional toolchain/backends
+check_language(Fortran)
+if(CMAKE_Fortran_COMPILER)
+    enable_language(Fortran)
+    if(CMAKE_Fortran_COMPILER_ID STREQUAL "GNU")
+        set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -Wall -Wextra")
+        set(CMAKE_Fortran_FLAGS_RELEASE "-O3 -DNDEBUG")
+        set(CMAKE_Fortran_FLAGS_DEBUG "-g -O0")
+    elseif(CMAKE_Fortran_COMPILER_ID MATCHES "Intel")
+        set(CMAKE_Fortran_FLAGS_RELEASE "-O3 -DNDEBUG")
+        set(CMAKE_Fortran_FLAGS_DEBUG "-g -O0")
+    endif()
 endif()
 
-# Find required packages
-find_package(BLAS REQUIRED)
-find_package(LAPACK REQUIRED)
+find_package(BLAS QUIET)
+find_package(LAPACK QUIET)
 
 # Python is only used for lightweight regression test scripts
 find_package(Python3 COMPONENTS Interpreter)
@@ -51,6 +57,11 @@ set(MKL_LIBRARIES "")
 set(FORTRAN_LIBS "")
 
 set(MKL_FOUND FALSE)
+set(HAVE_BLAS_LAPACK FALSE)
+if(BLAS_FOUND AND LAPACK_FOUND)
+    set(HAVE_BLAS_LAPACK TRUE)
+endif()
+
 if(USE_MKL AND DEFINED ENV{MKLROOT})
     set(MKL_ROOT $ENV{MKLROOT})
     if(EXISTS "${MKL_ROOT}/include/mkl.h")
@@ -99,14 +110,21 @@ if(MKL_FOUND)
         set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mkl")
     endif()
 else()
-    if(USE_MKL)
-        message(STATUS "Intel MKL requested (USE_MKL=ON) but not found; using system BLAS/LAPACK")
+    if(HAVE_BLAS_LAPACK)
+        if(USE_MKL)
+            message(STATUS "Intel MKL requested (USE_MKL=ON) but not found; using system BLAS/LAPACK")
+        else()
+            message(STATUS "Intel MKL disabled (USE_MKL=OFF); using system BLAS/LAPACK")
+        endif()
+        set(MKL_LIBRARIES ${BLAS_LIBRARIES} ${LAPACK_LIBRARIES})
+        set(MKL_INCLUDE_DIRS "")
+        set(FORTRAN_LIBS ${MKL_LIBRARIES})
     else()
-        message(STATUS "Intel MKL disabled (USE_MKL=OFF); using system BLAS/LAPACK")
+        message(STATUS "BLAS/LAPACK not found; calc_rmsd_xyz and allign_lapack will not be built")
+        set(MKL_LIBRARIES "")
+        set(MKL_INCLUDE_DIRS "")
+        set(FORTRAN_LIBS "")
     endif()
-    set(MKL_LIBRARIES ${BLAS_LIBRARIES} ${LAPACK_LIBRARIES})
-    set(MKL_INCLUDE_DIRS "")
-    set(FORTRAN_LIBS ${MKL_LIBRARIES})
 endif()
 
 # Create directories
@@ -132,6 +150,12 @@ if(NOT EXISTS ${SRC_DIR}/rmsd_align.cpp)
 endif()
 if(NOT EXISTS ${SRC_DIR}/calc_rmsd_xyz.f90)
     message(FATAL_ERROR "Cannot find ${SRC_DIR}/calc_rmsd_xyz.f90")
+endif()
+if(NOT EXISTS ${SRC_DIR}/allign_lapack.cpp)
+    message(FATAL_ERROR "Cannot find ${SRC_DIR}/allign_lapack.cpp")
+endif()
+if(NOT EXISTS ${SRC_DIR}/allign_eigen.cpp)
+    message(FATAL_ERROR "Cannot find ${SRC_DIR}/allign_eigen.cpp")
 endif()
 if(NOT EXISTS ${SRC_DIR}/xyzgeom.cpp)
     message(FATAL_ERROR "Cannot find ${SRC_DIR}/xyzgeom.cpp")
@@ -198,9 +222,23 @@ set_target_properties(neb_lib PROPERTIES
     POSITION_INDEPENDENT_CODE ON
 )
 
-# 1. Fortran RMSD calculator executable
-add_executable(calc_rmsd_xyz ${SRC_DIR}/calc_rmsd_xyz.f90)
-target_link_libraries(calc_rmsd_xyz ${FORTRAN_LIBS})
+# 1. RMSD alignment backends
+set(RMSD_BACKEND_TARGETS allign_eigen)
+
+add_executable(allign_eigen ${SRC_DIR}/allign_eigen.cpp)
+target_include_directories(allign_eigen PRIVATE ${CMAKE_SOURCE_DIR}/third_party/eigen-5.0.0)
+
+if(HAVE_BLAS_LAPACK)
+    add_executable(allign_lapack ${SRC_DIR}/allign_lapack.cpp)
+    target_link_libraries(allign_lapack ${BLAS_LIBRARIES} ${LAPACK_LIBRARIES})
+    list(APPEND RMSD_BACKEND_TARGETS allign_lapack)
+endif()
+
+if(CMAKE_Fortran_COMPILER AND HAVE_BLAS_LAPACK)
+    add_executable(calc_rmsd_xyz ${SRC_DIR}/calc_rmsd_xyz.f90)
+    target_link_libraries(calc_rmsd_xyz ${FORTRAN_LIBS})
+    list(APPEND RMSD_BACKEND_TARGETS calc_rmsd_xyz)
+endif()
 
 # 2. C++ XYZ Geometry Analyzer (Enhanced version)
 add_executable(xyzgeom ${SRC_DIR}/xyzgeom.cpp)
@@ -224,8 +262,9 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     endif()
 endif()
 
-# Set output directory for all executables
-set_target_properties(calc_rmsd_xyz xyzgeom neb_interpolator
+# Set output directory for main executables
+set(ALL_RUNTIME_TARGETS xyzgeom neb_interpolator ${RMSD_BACKEND_TARGETS})
+set_target_properties(${ALL_RUNTIME_TARGETS}
     PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
 )
@@ -295,6 +334,7 @@ H    3.000000    0.000000    0.000000
 # ========== Testing Targets ==========
 
 # Test RMSD alignment
+if(TARGET calc_rmsd_xyz)
 add_custom_target(test_rmsd
     COMMAND ${CMAKE_BINARY_DIR}/bin/calc_rmsd_xyz 
         ${CMAKE_BINARY_DIR}/examples/water.xyz 
@@ -303,6 +343,7 @@ add_custom_target(test_rmsd
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/bin
     COMMENT "Testing RMSD alignment with water molecules"
 )
+endif()
 
 # Test XYZ geometry analyzer
 add_custom_target(test_xyzgeom
@@ -319,7 +360,7 @@ add_custom_target(test_lic
         -n 3 -m lic
         ${CMAKE_BINARY_DIR}/examples/water.xyz 
         ${CMAKE_BINARY_DIR}/examples/water_rotated.xyz
-    DEPENDS neb_interpolator calc_rmsd_xyz
+    DEPENDS neb_interpolator
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/bin
     COMMENT "Testing LIC interpolation"
 )
@@ -347,6 +388,7 @@ add_custom_target(test_dm
 )
 
 # Test calc_rmsd_xyz range parsing (regression for a variable-reuse bug)
+if(TARGET calc_rmsd_xyz)
 add_custom_target(test_rmsd_range
     COMMAND ${PYTHON_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/test_rmsd_range.py
         ${CMAKE_BINARY_DIR}/bin/calc_rmsd_xyz
@@ -356,6 +398,7 @@ add_custom_target(test_rmsd_range
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/bin
     COMMENT "Testing calc_rmsd_xyz with explicit atom ranges"
 )
+endif()
 
 # Test LIIC->DM fallback path (forced LIIC failure via --ev-thresh)
 add_custom_target(test_dm_fallback
@@ -402,14 +445,19 @@ add_custom_target(test_neb_core
 )
 
 # Run all tests
+set(TEST_ALL_DEPENDS test_xyzgeom test_lic test_liic test_dm test_dm_fallback test_external_engine test_neb_core)
+if(TARGET calc_rmsd_xyz)
+    list(APPEND TEST_ALL_DEPENDS test_rmsd test_rmsd_range)
+endif()
+
 add_custom_target(test_all
-    DEPENDS test_rmsd test_rmsd_range test_xyzgeom test_lic test_liic test_dm test_dm_fallback test_external_engine test_neb_core
+    DEPENDS ${TEST_ALL_DEPENDS}
     COMMENT "Running all tests"
 )
 
 # ========== Installation ==========
 
-install(TARGETS calc_rmsd_xyz xyzgeom neb_interpolator
+install(TARGETS xyzgeom neb_interpolator ${RMSD_BACKEND_TARGETS}
     RUNTIME DESTINATION bin
 )
 
@@ -458,32 +506,22 @@ message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "Source directory: ${SRC_DIR}")
 message(STATUS "C++ compiler: ${CMAKE_CXX_COMPILER}")
 message(STATUS "C++ flags: ${CMAKE_CXX_FLAGS}")
-message(STATUS "Fortran compiler: ${CMAKE_Fortran_COMPILER}")
-message(STATUS "Fortran flags: ${CMAKE_Fortran_FLAGS}")
+if(CMAKE_Fortran_COMPILER)
+    message(STATUS "Fortran compiler: ${CMAKE_Fortran_COMPILER}")
+    message(STATUS "Fortran flags: ${CMAKE_Fortran_FLAGS}")
+else()
+    message(STATUS "Fortran compiler: not found")
+endif()
 if(MKL_FOUND)
     message(STATUS "BLAS/LAPACK: Intel MKL at ${MKL_ROOT}")
-else()
+elseif(HAVE_BLAS_LAPACK)
     message(STATUS "BLAS/LAPACK: System libraries")
+else()
+    message(STATUS "BLAS/LAPACK: not found")
 endif()
 message(STATUS "Install prefix: ${CMAKE_INSTALL_PREFIX}")
-message(STATUS "")
-message(STATUS "Source files:")
-message(STATUS "  ${SRC_DIR}/xyzgeom.cpp")
-message(STATUS "  ${SRC_DIR}/calc_rmsd_xyz.f90")
-message(STATUS "  ${SRC_DIR}/neb_interpolator.cpp")
-message(STATUS "  ${SRC_DIR}/neb_driver.cpp")
-message(STATUS "  ${SRC_DIR}/rmsd_align.cpp")
-message(STATUS "  ${SRC_DIR}/internal_ic.cpp")
-message(STATUS "  ${SRC_DIR}/neb_engine.cpp")
-message(STATUS "  ${SRC_DIR}/neb_core.cpp")
-message(STATUS "  ${SRC_DIR}/neb_driver.h")
-message(STATUS "  ${SRC_DIR}/rmsd_align.h")
-message(STATUS "  ${SRC_DIR}/internal_ic.h")
-message(STATUS "  ${SRC_DIR}/neb_engine.h")
-message(STATUS "  ${SRC_DIR}/neb_core.h")
-message(STATUS "  ${SRC_DIR}/zmat/covalent_radii.h")
-message(STATUS "")
 message(STATUS "Executables will be built in: ${CMAKE_BINARY_DIR}/bin")
+message(STATUS "Enabled RMSD backends: ${RMSD_BACKEND_TARGETS}")
 message(STATUS "===========================")
 
 # ========== Usage Target (替换原来的help) ==========
@@ -492,7 +530,7 @@ add_custom_target(usage
     COMMAND echo "Available targets:"
     COMMAND echo "  all            - Build all executables"
     COMMAND echo "  xyzgeom        - Build enhanced XYZ geometry analyzer"
-    COMMAND echo "  calc_rmsd_xyz  - Build Fortran RMSD calculator"
+    COMMAND echo "  calc_rmsd_xyz  - Build Fortran RMSD calculator (only when Fortran+BLAS/LAPACK are available)"
     COMMAND echo "  neb_interpolator - Build standalone NEB interpolator"
     COMMAND echo "  test_all       - Run all tests"
     COMMAND echo "  test_neb_core  - Run NEB core unit tests"
@@ -510,7 +548,7 @@ add_custom_target(usage
     COMMAND echo "  cd bin"
     COMMAND echo "  ./xyzgeom molecule.xyz              # Interactive mode"
     COMMAND echo "  ./xyzgeom molecule.xyz --print      # Print structure"
-    COMMAND echo "  ./calc_rmsd_xyz ref.xyz mobile.xyz  # Align structures"
+    COMMAND echo "  ./calc_rmsd_xyz ref.xyz mobile.xyz  # Align structures (if built)"
     COMMAND echo "  ./neb_interpolator initial.xyz final.xyz  # NEB interpolation"
     VERBATIM
 )
