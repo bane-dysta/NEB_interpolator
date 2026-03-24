@@ -43,7 +43,7 @@
 - LIIC 自动回退：LIIC → DM → LIC
 - 插值/NEB 前可选端点对齐（默认开启；用 `calc_rmsd_xyz`）
 - 支持外部引擎模式（NEB/NEB-LIIC 每个 cycle 调用外部程序返回梯度/力）
-- **重要**：未指定外部引擎时，NEB/NEB-LIIC 会使用 `DistancePenaltyEngine`（距离矩阵惩罚的“虚拟力”）进行路径平滑/示例，并不代表真实势能面上的 NEB。
+- **重要**：未指定外部引擎时，NEB/NEB-LIIC 会使用 `DistancePenaltyEngine`（距离矩阵惩罚的“虚拟力”）进行路径平滑示例，并不代表真实势能面上的 NEB。
 - 自动查找 `calc_rmsd_xyz`：优先 PATH，其次同目录，最后回退到 `./calc_rmsd_xyz`
 
 ## 系统要求
