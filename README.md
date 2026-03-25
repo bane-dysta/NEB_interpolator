@@ -87,7 +87,7 @@ make usage
 ## 目录结构
 
 ```
-MolecularGeometryTools/
+NEB_interpo/
 ├── CMakeLists.txt
 ├── README.md
 ├── src/

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-project(MolecularGeometryTools LANGUAGES CXX)
+project(NEB_interpo LANGUAGES CXX)
 
 include(CheckLanguage)
 

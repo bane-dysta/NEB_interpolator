@@ -1,0 +1,60 @@
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{tabularx}
+\usepackage{caption}
+\usepackage{fvextra}
+\usepackage{enumitem}
+\usepackage{fancyhdr}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{titlesec}
+\usepackage{setspace}
+\usepackage{float}
+
+\DefineVerbatimEnvironment{Highlighting}{Verbatim}{breaklines,breakanywhere,commandchars=\\\{\}}
+\fvset{fontsize=\small,breaklines=true,breakanywhere=true}
+\setlist{nosep}
+\setlength{\parindent}{2em}
+\setlength{\parskip}{0.35em}
+\renewcommand{\arraystretch}{1.2}
+\captionsetup{font=small}
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{NEB interpo 软件说明书}
+\fancyhead[R]{\nouppercase{\leftmark}}
+\fancyfoot[C]{\thepage}
+\setlength{\headheight}{14pt}
+
+\titleformat{\section}{\Large\bfseries}{\thesection}{0.8em}{}
+\titleformat{\subsection}{\large\bfseries}{\thesubsection}{0.8em}{}
+\titleformat{\subsubsection}{\normalsize\bfseries}{\thesubsubsection}{0.8em}{}
+
+
+\usepackage[htt]{hyphenat}
+\setlength{\LTleft}{0pt}
+\setlength{\LTright}{0pt}
+\setlength{\tabcolsep}{6pt}
+\emergencystretch=4em
+\sloppy
+\makeatletter
+\renewcommand{\maketitle}{%
+  \begin{titlepage}
+    \thispagestyle{empty}
+    \centering
+    \vspace*{0.18\textheight}
+    {\Huge\bfseries \@title\par}
+    \vspace{1.2cm}
+    {\Large\itshape 分子几何分析、RMSD 对齐与反应路径插值/NEB 优化\par}
+    \vspace{1.8cm}
+    \rule{0.72\textwidth}{0.8pt}\par
+    \vspace{1.2cm}
+    {\large 软件说明书\par}
+    \vfill
+    {\large NEB interpo\par}
+    \vspace{0.3cm}
+    {\normalsize \today\par}
+  \end{titlepage}%
+}
+\makeatother

@@ -1,5 +1,5 @@
 interpolator
-*.sh
 build/*
 *.tgz
 abort/*
+tar
