@@ -10,15 +10,19 @@
 
 #include "zmat/covalent_radii.h"
 
-// A lightweight, dependency-free internal-coordinate (LIIC/DLC-style) and
-// distance-matrix (DM) interpolator, inspired by GSM starting_string / starting_string_dm.
+// Lightweight interpolation backends used by neb_interpolator / xyzgeom.
 //
-// Notes:
-// - Primitive B matrix is computed via finite differences (fd_step).
-// - DLC basis is obtained by Jacobi diagonalization of G = Bp * Bp^T.
-// - Back-transform uses the identity: dx = Bp^T * (sum_i v_i * ( (v_i·dq) / (lambda_i + damp) )),
-//   where (lambda_i, v_i) are eigenpairs of G, selected by ev_thresh.
+// LIIC implementation notes:
+// - The interpolated target lives in primitive internal coordinates (bond / angle / torsion).
+// - The primitive B matrix is computed via finite differences (fd_step).
+// - A DLC-style basis is obtained by Jacobi diagonalization of G = Bp * Bp^T.
+// - Back-transform uses: dx = Bp^T * (sum_i v_i * ((v_i·dq) / (lambda_i + damp))),
+//   where (lambda_i, v_i) are selected eigenpairs of G.
 // - Torsion differences and FD differences are wrapped to [-pi, pi] to avoid long-way interpolation.
+//
+// DM implementation notes:
+// - The target distance matrix is linearly interpolated between endpoints.
+// - Cartesian coordinates are then optimized against that target distance matrix.
 
 namespace ICInterp {
 
@@ -26,7 +30,7 @@ namespace ICInterp {
 static inline double pi() { return 3.141592653589793238462643383279502884; }
 
 // Configuration structures
-struct IICOptions {
+struct LIICOptions {
     // Geometry / graph
     double bond_factor = 1.25;     // bond cutoff multiplier of (r_cov(i)+r_cov(j))
     // Finite difference
@@ -45,9 +49,6 @@ struct IICOptions {
     // Diagnostics
     int verbose = 0;
 };
-
-// Naming: LIIC = Linear Interpolation in Internal Coordinates
-using LIICOptions = IICOptions;
 
 
 struct DMOptions {
@@ -238,7 +239,7 @@ void build_angles_torsions(const std::vector<std::vector<int>>& nbrs,
 void build_union_primitives(const std::vector<std::string>& symbols,
                            const std::vector<double>& x0,
                            const std::vector<double>& x1,
-                           const IICOptions& opt,
+                           const LIICOptions& opt,
                            std::vector<PrimIC>& prims_out);
 bool jacobi_eigen(std::vector<double> A, int n,
                   std::vector<double>& d,
@@ -250,24 +251,13 @@ void compute_Bp_fd(const std::vector<double>& xyz,
 double rms_residual(const std::vector<double>& q_target,
                     const std::vector<double>& q_cur,
                     const std::vector<PrimIC>& prims);
-bool interpolate_iic(const std::vector<std::string>& symbols,
+bool interpolate_liic(const std::vector<std::string>& symbols,
                      const std::vector<double>& x0,
                      const std::vector<double>& x1,
                      int nimages,
                      std::vector<std::vector<double>>& out_images,
-                     const IICOptions& opt,
+                     const LIICOptions& opt,
                      std::string* err_msg);
-
-// New naming wrapper: LIIC (internal coordinates)
-static inline bool interpolate_liic(const std::vector<std::string>& symbols,
-                                   const std::vector<double>& x0,
-                                   const std::vector<double>& x1,
-                                   int nimages,
-                                   std::vector<std::vector<double>>& out_images,
-                                   const LIICOptions& opt,
-                                   std::string* err_msg) {
-    return interpolate_iic(symbols, x0, x1, nimages, out_images, opt, err_msg);
-}
 
 bool interpolate_dm(const std::vector<std::string>& symbols,
                     const std::vector<double>& x0,

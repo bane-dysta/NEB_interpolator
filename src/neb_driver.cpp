@@ -6,6 +6,7 @@
 #include <iomanip>
 #include <iostream>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <system_error>
 #include <vector>
@@ -14,6 +15,101 @@
 #include "zmat/covalent_radii.h"
 
 namespace neb {
+namespace {
+
+std::string makeDirectImageComment(PathMethod actual_method,
+                                   PathMethod requested_method,
+                                   int image_index)
+{
+    std::ostringstream oss;
+    oss << toString(actual_method) << " intermediate image " << image_index;
+    if (requested_method != PathMethod::NONE && requested_method != actual_method) {
+        oss << " [fallback from " << toString(requested_method) << "]";
+    }
+    return oss.str();
+}
+
+std::string makeNEBImageComment(Method requested_mode,
+                                PathMethod actual_method,
+                                PathMethod requested_path_method,
+                                int image_index)
+{
+    std::ostringstream oss;
+    oss << toString(requested_mode) << " optimized image " << image_index
+        << " [initialized with " << toString(actual_method);
+    if (actual_method != PathMethod::NONE && actual_method != requested_path_method) {
+        oss << ", fallback from " << toString(requested_path_method);
+    }
+    oss << "]";
+    return oss.str();
+}
+
+std::string decorateFailureReason(const std::string& prefix, const std::string& reason) {
+    if (reason.empty()) return prefix;
+    return prefix + " (" + reason + ")";
+}
+
+} // namespace
+
+std::string toString(Method method) {
+    switch (method) {
+        case Method::LIC:      return "LIC";
+        case Method::LIIC:     return "LIIC";
+        case Method::DM:       return "DM";
+        case Method::NEB:      return "NEB";
+        case Method::NEB_LIIC: return "NEB-LIIC";
+        default:               return "UNKNOWN";
+    }
+}
+
+std::string toString(PathMethod method) {
+    switch (method) {
+        case PathMethod::NONE: return "NONE";
+        case PathMethod::LIC:  return "LIC";
+        case PathMethod::LIIC: return "LIIC";
+        case PathMethod::DM:   return "DM";
+        default:               return "UNKNOWN";
+    }
+}
+
+std::string toString(RunStatus status) {
+    switch (status) {
+        case RunStatus::NOT_RUN:                 return "NOT_RUN";
+        case RunStatus::GENERATED_EXACT:         return "GENERATED_EXACT";
+        case RunStatus::GENERATED_WITH_FALLBACK: return "GENERATED_WITH_FALLBACK";
+        case RunStatus::FATAL_ERROR:             return "FATAL_ERROR";
+        default:                                 return "UNKNOWN";
+    }
+}
+
+PathMethod requestedPathMethod(Method method) {
+    switch (method) {
+        case Method::LIC:
+        case Method::NEB:
+            return PathMethod::LIC;
+        case Method::LIIC:
+        case Method::NEB_LIIC:
+            return PathMethod::LIIC;
+        case Method::DM:
+            return PathMethod::DM;
+        default:
+            return PathMethod::NONE;
+    }
+}
+
+bool modeUsesNEB(Method method) {
+    return method == Method::NEB || method == Method::NEB_LIIC;
+}
+
+std::string formatPathMethodChain(const std::vector<PathMethod>& methods) {
+    if (methods.empty()) return "(none)";
+    std::ostringstream oss;
+    for (size_t i = 0; i < methods.size(); ++i) {
+        if (i > 0) oss << " -> ";
+        oss << toString(methods[i]);
+    }
+    return oss.str();
+}
 
 NEBDriver::NEBDriver(int num_img,
                      double step,
@@ -43,8 +139,8 @@ void NEBDriver::setDMOptions(const ICInterp::DMOptions& opt) {
     dm_options_ = opt;
 }
 
-void NEBDriver::setDMFallback(bool enable) {
-    enable_dm_fallback_ = enable;
+void NEBDriver::setLIICToDMFallback(bool enable) {
+    enable_liic_to_dm_fallback_ = enable;
 }
 
 void NEBDriver::setAlignment(bool enable) {
@@ -114,7 +210,7 @@ bool NEBDriver::setStructuresFromFiles(const std::string& initial_file,
 }
 
 void NEBDriver::setInitialFromMemory(const std::vector<geom::Atom>& atoms_in,
-                                    const std::string& comment)
+                                     const std::string& comment)
 {
     initial_.atoms = atoms_in;
     initial_.comment = comment;
@@ -185,8 +281,62 @@ bool NEBDriver::setFinalFromFile(const std::string& final_file, std::string* err
     return true;
 }
 
-void NEBDriver::performLIC_() {
-    std::cout << "  Initializing intermediate images using Cartesian linear interpolation (LIC)..." << std::endl;
+void NEBDriver::collectEndpointArrays_(std::vector<std::string>& symbols,
+                                       std::vector<double>& x0,
+                                       std::vector<double>& x1) const
+{
+    const size_t n = initial_.size();
+    symbols.resize(n);
+    x0.assign(3 * n, 0.0);
+    x1.assign(3 * n, 0.0);
+
+    for (size_t i = 0; i < n; ++i) {
+        symbols[i] = initial_.atoms[i].symbol;
+        x0[3 * i + 0] = initial_.atoms[i].x;
+        x0[3 * i + 1] = initial_.atoms[i].y;
+        x0[3 * i + 2] = initial_.atoms[i].z;
+
+        x1[3 * i + 0] = final_.atoms[i].x;
+        x1[3 * i + 1] = final_.atoms[i].y;
+        x1[3 * i + 2] = final_.atoms[i].z;
+    }
+}
+
+void NEBDriver::loadImagesFromCartesian_(const std::vector<std::string>& symbols,
+                                         const std::vector<std::vector<double>>& imgs_xyz,
+                                         PathMethod actual_method,
+                                         PathMethod requested_method)
+{
+    images_.clear();
+    images_.resize(num_images_);
+
+    for (int img = 0; img < num_images_; ++img) {
+        images_[img].atoms.resize(symbols.size());
+        images_[img].comment = makeDirectImageComment(actual_method, requested_method, img + 1);
+        for (size_t i = 0; i < symbols.size(); ++i) {
+            images_[img].atoms[i].symbol = symbols[i];
+            images_[img].atoms[i].x = imgs_xyz[img][3 * i + 0];
+            images_[img].atoms[i].y = imgs_xyz[img][3 * i + 1];
+            images_[img].atoms[i].z = imgs_xyz[img][3 * i + 2];
+        }
+    }
+}
+
+NEBDriver::PathBuildResult NEBDriver::generateLICPath_(PathMethod requested_method,
+                                                       const std::string& intro_message)
+{
+    if (!intro_message.empty()) {
+        std::cout << intro_message << std::endl;
+    }
+    std::cout << "  Generating path using Cartesian linear interpolation (LIC)..." << std::endl;
+
+    PathBuildResult result;
+    result.path_generated = true;
+    result.actual_method = PathMethod::LIC;
+    result.attempted_methods = {PathMethod::LIC};
+    result.detail = (requested_method == PathMethod::LIC)
+        ? "Path generated with LIC."
+        : ("Requested " + toString(requested_method) + " was not realized; LIC generated the path.");
 
     images_.clear();
     images_.resize(num_images_);
@@ -195,7 +345,7 @@ void NEBDriver::performLIC_() {
         const double factor = static_cast<double>(img + 1) / (num_images_ + 1);
 
         images_[img].atoms.resize(initial_.size());
-        images_[img].comment = "LIC intermediate image " + std::to_string(img + 1);
+        images_[img].comment = makeDirectImageComment(PathMethod::LIC, requested_method, img + 1);
 
         for (size_t i = 0; i < initial_.size(); ++i) {
             images_[img].atoms[i].symbol = initial_.atoms[i].symbol;
@@ -204,201 +354,129 @@ void NEBDriver::performLIC_() {
             images_[img].atoms[i].z = initial_.atoms[i].z + factor * (final_.atoms[i].z - initial_.atoms[i].z);
         }
     }
+
+    return result;
 }
 
-bool NEBDriver::performLIIC_(std::string* err) {
-    std::cout << "  Initializing intermediate images using internal-coordinate interpolation (LIIC)..." << std::endl;
+NEBDriver::PathBuildResult NEBDriver::generateLIICPath_(std::string* err) {
+    if (err) err->clear();
+    std::cout << "  Generating path using linear interpolation in internal coordinates (LIIC)..." << std::endl;
 
-    const size_t n = initial_.size();
-    std::vector<std::string> symbols(n);
-    std::vector<double> x0(3 * n, 0.0), x1(3 * n, 0.0);
+    PathBuildResult result;
+    result.attempted_methods.push_back(PathMethod::LIIC);
 
-    for (size_t i = 0; i < n; ++i) {
-        symbols[i] = initial_.atoms[i].symbol;
-        x0[3 * i + 0] = initial_.atoms[i].x;
-        x0[3 * i + 1] = initial_.atoms[i].y;
-        x0[3 * i + 2] = initial_.atoms[i].z;
-
-        x1[3 * i + 0] = final_.atoms[i].x;
-        x1[3 * i + 1] = final_.atoms[i].y;
-        x1[3 * i + 2] = final_.atoms[i].z;
-    }
+    std::vector<std::string> symbols;
+    std::vector<double> x0;
+    std::vector<double> x1;
+    collectEndpointArrays_(symbols, x0, x1);
 
     std::vector<std::vector<double>> imgs_xyz;
-    std::string local_err;
+    std::string liic_reason;
 
     try {
-        bool ok = ICInterp::interpolate_liic(symbols, x0, x1, num_images_, imgs_xyz, liic_options_, &local_err);
-
-        if (!ok) {
-            std::cerr << "  LIIC failed: " << local_err << std::endl;
-
-            if (enable_dm_fallback_) {
-                std::cout << "  Falling back to distance-matrix interpolation (DM)..." << std::endl;
-                bool ok_dm = ICInterp::interpolate_dm(symbols, x0, x1, num_images_, imgs_xyz, dm_options_, &local_err);
-                if (!ok_dm) {
-                    std::cerr << "  DM fallback failed: " << local_err << std::endl;
-                    std::cout << "  Falling back to Cartesian LIC..." << std::endl;
-                    performLIC_();
-                    return false;
-                }
-
-                images_.clear();
-                images_.resize(num_images_);
-                for (int img = 0; img < num_images_; ++img) {
-                    images_[img].atoms.resize(n);
-                    images_[img].comment = "DM (fallback) intermediate image " + std::to_string(img + 1);
-                    for (size_t i = 0; i < n; ++i) {
-                        images_[img].atoms[i].symbol = symbols[i];
-                        images_[img].atoms[i].x = imgs_xyz[img][3 * i + 0];
-                        images_[img].atoms[i].y = imgs_xyz[img][3 * i + 1];
-                        images_[img].atoms[i].z = imgs_xyz[img][3 * i + 2];
-                    }
-                }
-                return true;
-            }
-
-            std::cout << "  DM fallback disabled. Falling back to Cartesian LIC..." << std::endl;
-            performLIC_();
-            return false;
+        bool ok = ICInterp::interpolate_liic(symbols, x0, x1, num_images_, imgs_xyz, liic_options_, &liic_reason);
+        if (ok) {
+            loadImagesFromCartesian_(symbols, imgs_xyz, PathMethod::LIIC, PathMethod::LIIC);
+            result.path_generated = true;
+            result.actual_method = PathMethod::LIIC;
+            result.detail = "Path generated with LIIC.";
+            return result;
         }
-
-        images_.clear();
-        images_.resize(num_images_);
-        for (int img = 0; img < num_images_; ++img) {
-            images_[img].atoms.resize(n);
-            images_[img].comment = "LIIC intermediate image " + std::to_string(img + 1);
-            for (size_t i = 0; i < n; ++i) {
-                images_[img].atoms[i].symbol = symbols[i];
-                images_[img].atoms[i].x = imgs_xyz[img][3 * i + 0];
-                images_[img].atoms[i].y = imgs_xyz[img][3 * i + 1];
-                images_[img].atoms[i].z = imgs_xyz[img][3 * i + 2];
-            }
-        }
-
-        return true;
-
+        std::cerr << "  LIIC failed: " << liic_reason << std::endl;
     } catch (const ChemData::UnknownElementError& e) {
+        result.fatal = true;
+        result.detail = e.what();
         if (err) *err = e.what();
-        // Fatal: do NOT fall back to LIC/DM, because the input is invalid.
-        return false;
+        return result;
     } catch (const std::exception& e) {
-        // Non-fatal: preserve legacy behavior (fall back)
+        liic_reason = e.what();
         std::cerr << "  LIIC failed with exception: " << e.what() << std::endl;
-        if (enable_dm_fallback_) {
-            std::cout << "  Falling back to distance-matrix interpolation (DM)..." << std::endl;
-            try {
-                bool ok_dm = ICInterp::interpolate_dm(symbols, x0, x1, num_images_, imgs_xyz, dm_options_, &local_err);
-                if (!ok_dm) {
-                    std::cerr << "  DM fallback failed: " << local_err << std::endl;
-                    std::cout << "  Falling back to Cartesian LIC..." << std::endl;
-                    performLIC_();
-                    return false;
-                }
-
-                images_.clear();
-                images_.resize(num_images_);
-                for (int img = 0; img < num_images_; ++img) {
-                    images_[img].atoms.resize(n);
-                    images_[img].comment = "DM (fallback) intermediate image " + std::to_string(img + 1);
-                    for (size_t i = 0; i < n; ++i) {
-                        images_[img].atoms[i].symbol = symbols[i];
-                        images_[img].atoms[i].x = imgs_xyz[img][3 * i + 0];
-                        images_[img].atoms[i].y = imgs_xyz[img][3 * i + 1];
-                        images_[img].atoms[i].z = imgs_xyz[img][3 * i + 2];
-                    }
-                }
-                return true;
-            } catch (const ChemData::UnknownElementError& ee) {
-                if (err) *err = ee.what();
-                return false;
-            } catch (const std::exception& ee) {
-                std::cerr << "  DM fallback failed with exception: " << ee.what() << std::endl;
-                std::cout << "  Falling back to Cartesian LIC..." << std::endl;
-                performLIC_();
-                return false;
-            }
-        }
-
-        std::cout << "  DM fallback disabled. Falling back to Cartesian LIC..." << std::endl;
-        performLIC_();
-        return false;
     }
+
+    if (enable_liic_to_dm_fallback_) {
+        result.attempted_methods.push_back(PathMethod::DM);
+        std::cout << "  Attempting distance-matrix fallback (DM)..." << std::endl;
+
+        std::string dm_reason;
+        try {
+            bool ok_dm = ICInterp::interpolate_dm(symbols, x0, x1, num_images_, imgs_xyz, dm_options_, &dm_reason);
+            if (ok_dm) {
+                loadImagesFromCartesian_(symbols, imgs_xyz, PathMethod::DM, PathMethod::LIIC);
+                result.path_generated = true;
+                result.actual_method = PathMethod::DM;
+                result.detail = decorateFailureReason("LIIC failed and DM generated the path", liic_reason) + ".";
+                return result;
+            }
+            std::cerr << "  DM fallback failed: " << dm_reason << std::endl;
+            liic_reason = decorateFailureReason(liic_reason.empty() ? "LIIC failure" : liic_reason,
+                                                "DM fallback also failed: " + dm_reason);
+        } catch (const ChemData::UnknownElementError& e) {
+            result.fatal = true;
+            result.detail = e.what();
+            if (err) *err = e.what();
+            return result;
+        } catch (const std::exception& e) {
+            std::cerr << "  DM fallback failed with exception: " << e.what() << std::endl;
+            liic_reason = decorateFailureReason(liic_reason.empty() ? "LIIC failure" : liic_reason,
+                                                std::string("DM fallback exception: ") + e.what());
+        }
+    } else {
+        std::cout << "  LIIC->DM fallback disabled; skipping DM." << std::endl;
+    }
+
+    PathBuildResult lic_result = generateLICPath_(PathMethod::LIIC,
+                                                  "  Falling back to Cartesian linear interpolation (LIC)...");
+    lic_result.attempted_methods = result.attempted_methods;
+    lic_result.attempted_methods.push_back(PathMethod::LIC);
+    lic_result.detail = decorateFailureReason("LIIC could not be realized; LIC generated the path", liic_reason) + ".";
+    return lic_result;
 }
 
-bool NEBDriver::performDM_(std::string* err) {
-    std::cout << "  Initializing intermediate images using distance-matrix interpolation (DM)..." << std::endl;
+NEBDriver::PathBuildResult NEBDriver::generateDMPath_(std::string* err) {
+    if (err) err->clear();
+    std::cout << "  Generating path using distance-matrix interpolation (DM)..." << std::endl;
 
-    const size_t n = initial_.size();
-    std::vector<std::string> symbols(n);
-    std::vector<double> x0(3 * n, 0.0), x1(3 * n, 0.0);
+    PathBuildResult result;
+    result.attempted_methods.push_back(PathMethod::DM);
 
-    for (size_t i = 0; i < n; ++i) {
-        symbols[i] = initial_.atoms[i].symbol;
-        x0[3 * i + 0] = initial_.atoms[i].x;
-        x0[3 * i + 1] = initial_.atoms[i].y;
-        x0[3 * i + 2] = initial_.atoms[i].z;
-
-        x1[3 * i + 0] = final_.atoms[i].x;
-        x1[3 * i + 1] = final_.atoms[i].y;
-        x1[3 * i + 2] = final_.atoms[i].z;
-    }
+    std::vector<std::string> symbols;
+    std::vector<double> x0;
+    std::vector<double> x1;
+    collectEndpointArrays_(symbols, x0, x1);
 
     std::vector<std::vector<double>> imgs_xyz;
-    std::string local_err;
+    std::string dm_reason;
 
     try {
-        bool ok = ICInterp::interpolate_dm(symbols, x0, x1, num_images_, imgs_xyz, dm_options_, &local_err);
-        if (!ok) {
-            std::cerr << "  DM failed: " << local_err << std::endl;
-            std::cout << "  Falling back to Cartesian LIC..." << std::endl;
-            performLIC_();
-            return false;
+        bool ok = ICInterp::interpolate_dm(symbols, x0, x1, num_images_, imgs_xyz, dm_options_, &dm_reason);
+        if (ok) {
+            loadImagesFromCartesian_(symbols, imgs_xyz, PathMethod::DM, PathMethod::DM);
+            result.path_generated = true;
+            result.actual_method = PathMethod::DM;
+            result.detail = "Path generated with DM.";
+            return result;
         }
-
-        images_.clear();
-        images_.resize(num_images_);
-        for (int img = 0; img < num_images_; ++img) {
-            images_[img].atoms.resize(n);
-            images_[img].comment = "DM intermediate image " + std::to_string(img + 1);
-            for (size_t i = 0; i < n; ++i) {
-                images_[img].atoms[i].symbol = symbols[i];
-                images_[img].atoms[i].x = imgs_xyz[img][3 * i + 0];
-                images_[img].atoms[i].y = imgs_xyz[img][3 * i + 1];
-                images_[img].atoms[i].z = imgs_xyz[img][3 * i + 2];
-            }
-        }
-
-        return true;
-
+        std::cerr << "  DM failed: " << dm_reason << std::endl;
     } catch (const ChemData::UnknownElementError& e) {
+        result.fatal = true;
+        result.detail = e.what();
         if (err) *err = e.what();
-        // Fatal: invalid input.
-        return false;
+        return result;
     } catch (const std::exception& e) {
+        dm_reason = e.what();
         std::cerr << "  DM failed with exception: " << e.what() << std::endl;
-        std::cout << "  Falling back to Cartesian LIC..." << std::endl;
-        performLIC_();
-        return false;
     }
+
+    PathBuildResult lic_result = generateLICPath_(PathMethod::DM,
+                                                  "  Falling back to Cartesian linear interpolation (LIC)...");
+    lic_result.attempted_methods = result.attempted_methods;
+    lic_result.attempted_methods.push_back(PathMethod::LIC);
+    lic_result.detail = decorateFailureReason("DM could not be realized; LIC generated the path", dm_reason) + ".";
+    return lic_result;
 }
 
-bool NEBDriver::performNEB_(bool init_with_liic, std::string* err) {
+bool NEBDriver::optimizeNEB_(std::string* err) {
     std::cout << "Performing Nudged Elastic Band (NEB) optimization..." << std::endl;
-
-    // Initialize images
-    if (init_with_liic) {
-        std::string liic_err;
-        bool ok = performLIIC_(&liic_err);
-        if (!ok && !liic_err.empty()) {
-            // Fatal (unknown element): abort NEB.
-            if (err) *err = liic_err;
-            return false;
-        }
-        // Non-fatal LIIC failure may have fallen back to LIC; continue.
-    } else {
-        performLIC_();
-    }
 
     const int natoms = static_cast<int>(initial_.size());
     if (natoms <= 0) {
@@ -465,44 +543,124 @@ bool NEBDriver::performNEB_(bool init_with_liic, std::string* err) {
     return true;
 }
 
+void NEBDriver::updateNEBImageComments_(Method requested_mode,
+                                        const PathBuildResult& init_result)
+{
+    const PathMethod requested_method = requestedPathMethod(requested_mode);
+    for (int img = 0; img < num_images_; ++img) {
+        images_[img].comment = makeNEBImageComment(requested_mode,
+                                                   init_result.actual_method,
+                                                   requested_method,
+                                                   img + 1);
+    }
+}
+
+void NEBDriver::resetRunReport_(Method method) {
+    last_run_report_ = RunReport{};
+    last_run_report_.requested_mode = method;
+    last_run_report_.requested_path_method = requestedPathMethod(method);
+    last_run_report_.optimized_with_neb = modeUsesNEB(method);
+}
+
+void NEBDriver::finalizeRunReport_(Method method,
+                                   const PathBuildResult& result,
+                                   bool optimized_with_neb,
+                                   const std::string& detail_override)
+{
+    last_run_report_.requested_mode = method;
+    last_run_report_.requested_path_method = requestedPathMethod(method);
+    last_run_report_.actual_path_method = result.actual_method;
+    last_run_report_.attempted_path_methods = result.attempted_methods;
+    last_run_report_.optimized_with_neb = optimized_with_neb;
+    last_run_report_.path_generated = result.path_generated && !result.fatal;
+    last_run_report_.used_fallback =
+        (result.actual_method != PathMethod::NONE && result.actual_method != last_run_report_.requested_path_method);
+    last_run_report_.detail = detail_override.empty() ? result.detail : detail_override;
+
+    if (result.fatal || !last_run_report_.path_generated) {
+        last_run_report_.status = RunStatus::FATAL_ERROR;
+    } else if (last_run_report_.used_fallback) {
+        last_run_report_.status = RunStatus::GENERATED_WITH_FALLBACK;
+    } else {
+        last_run_report_.status = RunStatus::GENERATED_EXACT;
+    }
+}
+
 bool NEBDriver::run(Method method, std::string* err) {
-    // Clear any previous path
     images_.clear();
+    resetRunReport_(method);
+    if (err) err->clear();
+
+    PathBuildResult path_result;
 
     switch (method) {
         case Method::LIC:
-            performLIC_();
-            return true;
+            path_result = generateLICPath_(PathMethod::LIC);
+            finalizeRunReport_(method, path_result, false);
+            return last_run_report_.path_generated;
 
-        case Method::LIIC: {
-            std::string local;
-            (void)performLIIC_(&local);
-            if (!local.empty()) {
-                if (err) *err = local;
-                // Fatal only if local is set (currently only unknown element)
-                return false;
+        case Method::LIIC:
+            path_result = generateLIICPath_(err);
+            finalizeRunReport_(method, path_result, false);
+            if (!last_run_report_.path_generated && err && err->empty()) {
+                *err = last_run_report_.detail;
             }
-            return true;
-        }
+            return last_run_report_.path_generated;
 
-        case Method::DM: {
-            std::string local;
-            (void)performDM_(&local);
-            if (!local.empty()) {
-                if (err) *err = local;
-                return false;
+        case Method::DM:
+            path_result = generateDMPath_(err);
+            finalizeRunReport_(method, path_result, false);
+            if (!last_run_report_.path_generated && err && err->empty()) {
+                *err = last_run_report_.detail;
             }
-            return true;
-        }
+            return last_run_report_.path_generated;
 
         case Method::NEB:
-            return performNEB_(false, err);
+        case Method::NEB_LIIC: {
+            path_result = (method == Method::NEB)
+                ? generateLICPath_(PathMethod::LIC)
+                : generateLIICPath_(err);
 
-        case Method::NEB_LIIC:
-            return performNEB_(true, err);
+            if (path_result.fatal || !path_result.path_generated) {
+                finalizeRunReport_(method, path_result, true);
+                if (err && err->empty()) {
+                    *err = last_run_report_.detail;
+                }
+                return false;
+            }
+
+            if (!optimizeNEB_(err)) {
+                PathBuildResult failed = path_result;
+                failed.path_generated = false;
+                failed.fatal = true;
+                std::string detail = toString(method) + " failed during NEB optimization";
+                if (err && !err->empty()) {
+                    detail += ": " + *err;
+                }
+                finalizeRunReport_(method, failed, true, detail);
+                return false;
+            }
+
+            updateNEBImageComments_(method, path_result);
+
+            std::ostringstream detail;
+            detail << toString(method) << " completed with " << toString(path_result.actual_method)
+                   << " initialization";
+            if (path_result.actual_method != requestedPathMethod(method)) {
+                detail << " (fallback from " << toString(requestedPathMethod(method)) << ")";
+            }
+            detail << ".";
+
+            finalizeRunReport_(method, path_result, true, detail.str());
+            if (err) err->clear();
+            return true;
+        }
 
         default:
             if (err) *err = "Error: unknown method.";
+            path_result.fatal = true;
+            path_result.detail = "Error: unknown method.";
+            finalizeRunReport_(method, path_result, false);
             return false;
     }
 }

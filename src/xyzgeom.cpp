@@ -313,12 +313,12 @@ public:
         (void)ec;
     }
 
-    // Function 14: Path interpolation with second XYZ file (LIC / LIIC)
-    void performNEBWithSecondXYZ() {
+    // Function 14: Path interpolation with second XYZ file (LIC / LIIC / DM)
+    void performInterpolationWithSecondXYZ() {
         std::cout << "Enter final XYZ filename for interpolation: ";
         std::string finalFile;
         std::getline(std::cin, finalFile);
-        
+
         // Check if final file exists
         std::ifstream check(finalFile);
         if (!check.is_open()) {
@@ -326,7 +326,7 @@ public:
             return;
         }
         check.close();
-        
+
         std::cout << "Enter number of intermediate images (default 5): ";
         std::string input;
         std::getline(std::cin, input);
@@ -343,27 +343,31 @@ public:
             std::cerr << "Warning: Number of images must be positive, using default 5." << std::endl;
             numImages = 5;
         }
-        
-        std::cout << "Choose method LIC or LIIC (default: LIC): ";
+
+        std::cout << "Choose method LIC, LIIC, or DM (default: LIC): ";
         std::getline(std::cin, input);
 
-        // Normalize input: lowercase + strip whitespace
         std::string m = input;
         m.erase(std::remove_if(m.begin(), m.end(), [](unsigned char c){ return std::isspace(c) != 0; }), m.end());
         std::transform(m.begin(), m.end(), m.begin(), [](unsigned char c){ return static_cast<char>(std::tolower(c)); });
 
-        bool useLIIC = (m == "liic" || m == "i");
-        
+        neb::Method requested_method = neb::Method::LIC;
+        if (m == "liic" || m == "i") {
+            requested_method = neb::Method::LIIC;
+        } else if (m == "dm" || m == "d") {
+            requested_method = neb::Method::DM;
+        } else if (!m.empty() && m != "lic" && m != "l") {
+            std::cerr << "Warning: Unknown method '" << input << "'; using LIC." << std::endl;
+        }
+
         std::cout << "Enter output prefix (default: intrp_): ";
         std::string prefix;
         std::getline(std::cin, prefix);
         if (prefix.empty()) prefix = "intrp_";
-        
-        // Shared NEB / interpolation driver (same implementation as neb_interpolator)
+
         neb::NEBDriver driver(numImages);
         driver.setRMSDExecutable(rmsd::findCalcRMSDExecutable());
 
-        // Convert current atoms to driver format (geom::Atom)
         std::vector<geom::Atom> init_atoms;
         init_atoms.reserve(atoms.size());
         for (const auto& atom : atoms) {
@@ -377,29 +381,18 @@ public:
             return;
         }
 
-        if (useLIIC) {
-            if (!driver.run(neb::Method::LIIC, &err)) {
-                std::cerr << (err.empty() ? "Error: LIIC failed" : err) << std::endl;
-                return;
-            }
-        } else {
-            if (!driver.run(neb::Method::LIC, &err)) {
-                std::cerr << (err.empty() ? "Error: LIC failed" : err) << std::endl;
-                return;
-            }
+        if (!driver.run(requested_method, &err)) {
+            std::cerr << (err.empty() ? "Error: interpolation failed" : err) << std::endl;
+            return;
         }
 
-        if (useLIIC) {
-            // NEBDriver::run(Method::LIIC) may fall back to DM/LIC while still returning success.
-            // The per-image comment encodes the initializer actually used.
-            const auto& imgs = driver.images();
-            if (!imgs.empty()) {
-                const std::string& c0 = imgs.front().comment;
-                if (c0.rfind("LIIC", 0) != 0) {
-                    std::cerr << "Warning: requested LIIC, but initialization used fallback (" << c0 << ")."
-                              << std::endl;
-                }
-            }
+        const auto& report = driver.lastRunReport();
+        std::cout << "Requested method: " << neb::toString(report.requested_path_method) << std::endl;
+        std::cout << "Actual method used: " << neb::toString(report.actual_path_method) << std::endl;
+        std::cout << "Attempted methods: " << neb::formatPathMethodChain(report.attempted_path_methods) << std::endl;
+        if (report.used_fallback) {
+            std::cerr << "Warning: requested method was not realized exactly; generated path uses "
+                      << neb::toString(report.actual_path_method) << "." << std::endl;
         }
 
         if (!driver.writeResults(prefix, /*multiframe=*/false)) {
@@ -407,7 +400,11 @@ public:
             return;
         }
 
-        std::cout << "Interpolation completed successfully!" << std::endl;
+        if (report.used_fallback) {
+            std::cout << "Interpolation completed with fallback." << std::endl;
+        } else {
+            std::cout << "Interpolation completed successfully!" << std::endl;
+        }
     }
     
     // Function 1: Calculate distance and vector between 2 atoms
@@ -866,7 +863,7 @@ public:
         std::cout << "11. Load new XYZ file" << std::endl;
         std::cout << "12. Toggle distance unit (Bohr/Angstrom)" << std::endl;
         std::cout << "13. Align with second XYZ file (RMSD)" << std::endl;
-        std::cout << "14. Interpolation with second XYZ file (LIC/LIIC)" << std::endl;
+        std::cout << "14. Interpolation with second XYZ file (LIC/LIIC/DM)" << std::endl;
         std::cout << "0.  Exit" << std::endl;
         std::cout << "\nEnter choice: ";
     }
@@ -924,7 +921,7 @@ public:
                 case 11: loadNewFile(); break;
                 case 12: toggleUnits(); break;
                 case 13: alignWithSecondXYZ(); break;
-                case 14: performNEBWithSecondXYZ(); break;
+                case 14: performInterpolationWithSecondXYZ(); break;
                 case 0:
                     std::cout << "Exiting..." << std::endl;
                     return;

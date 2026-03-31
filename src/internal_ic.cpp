@@ -188,7 +188,7 @@ void build_angles_torsions(const std::vector<std::vector<int>>& nbrs,
 void build_union_primitives(const std::vector<std::string>& symbols,
                             const std::vector<double>& x0,
                             const std::vector<double>& x1,
-                            const IICOptions& opt,
+                            const LIICOptions& opt,
                             std::vector<PrimIC>& prims_out)
 {
     std::vector<PrimIC> bonds, angles, torsions;
@@ -329,13 +329,14 @@ double rms_residual(const std::vector<double>& q_target,
     return std::sqrt(ss / m);
 }
 
-// Main LIIC interpolation (returns false if any image fails; caller may fallback to DM/LIC).
-bool interpolate_iic(const std::vector<std::string>& symbols,
+// Main LIIC interpolation: linear targets in primitive internal coordinates plus DLC-style back-transform.
+// Returns false if any image fails; callers may apply fallback policy outside this function.
+bool interpolate_liic(const std::vector<std::string>& symbols,
                      const std::vector<double>& x0,
                      const std::vector<double>& x1,
                      int nimages,
                      std::vector<std::vector<double>>& out_images,
-                     const IICOptions& opt,
+                     const LIICOptions& opt,
                      std::string* err_msg)
 {
     out_images.clear();

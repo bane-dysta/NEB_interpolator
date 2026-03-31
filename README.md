@@ -1,5 +1,3 @@
-*README由GPT 5.2，可查看帮助；彩虹屁勿信。*
-
 # 分子几何工具
 
 用于分子结构分析、RMSD 对齐，以及反应路径插值/NEB 优化的一组小工具。
@@ -19,7 +17,7 @@
 - 计算距离、角度和二面角
 - 原子操作（交换、镜像、导出）
 - RMSD 对齐（调用 `calc_rmsd_xyz`；与 `neb_interpolator` 使用同一套“查找 + 调用”逻辑）
-- 与第二个 XYZ 的 LIC/NEB 路径生成
+- 与第二个 XYZ 的 LIC/LIIC/DM 路径生成
 - 支持 Angstrom/Bohr 单位
 - 兼容 Gview 风格的原子选择语法
 
@@ -36,15 +34,16 @@
 
 - 插值/优化方法：LIC / LIIC / DM / NEB / NEB-LIIC
   - **LIC**：Cartesian linear interpolation（笛卡尔坐标线性插值）
-  - **LIIC**：internal-coordinate interpolation（基于 DLC/Delocalized Internal Coordinates 的内坐标插值）
+  - **LIIC**：internal-coordinate interpolation（primitive internal coordinates 线性目标 + DLC-style back-transform）
   - **DM**：distance-matrix interpolation（距离矩阵插值）
   - **NEB**：NEB 优化（默认用 LIC 初始化路径）
   - **NEB-LIIC**：NEB 优化（用 LIIC 初始化路径）
-- LIIC 自动回退：LIIC → DM → LIC
+- 默认回退链：LIIC → DM → LIC；直接 `DM` 失败时会回退到 `LIC`
 - 插值/NEB 前可选端点对齐（默认开启；用 `calc_rmsd_xyz`）
 - 支持外部引擎模式（NEB/NEB-LIIC 每个 cycle 调用外部程序返回梯度/力）
 - **重要**：未指定外部引擎时，NEB/NEB-LIIC 会使用 `DistancePenaltyEngine`（距离矩阵惩罚的“虚拟力”）进行路径平滑示例，并不代表真实势能面上的 NEB。
 - 自动查找 `calc_rmsd_xyz`：优先 PATH，其次同目录，最后回退到 `./calc_rmsd_xyz`
+- 每次运行都会输出 requested/actual path method summary，明确显示是否发生回退
 
 ## 系统要求
 
@@ -122,7 +121,7 @@ NEB_interpo/
 核心菜单（节选）：
 
 - 13. 与第二个 XYZ 文件对齐（RMSD，对齐工具为 `calc_rmsd_xyz`）
-- 14. 与第二个 XYZ 进行路径生成
+- 14. 与第二个 XYZ 进行路径生成（LIC / LIIC / DM）
 
 命令行模式示例：
 
@@ -167,6 +166,9 @@ NEB_interpo/
 # DM 插值
 ./bin/neb_interpolator -m dm -n 8 initial.xyz final.xyz
 
+# 严格要求 requested method 必须被真正采用（否则退出码为 2）
+./bin/neb_interpolator -m liic --strict-path-method initial.xyz final.xyz
+
 # NEB-LIIC（用 LIIC 初始化再做 NEB）
 ./bin/neb_interpolator -n 10 -m neb-liic initial.xyz final.xyz
 
@@ -184,6 +186,7 @@ NEB_interpo/
 - `-p, --prefix PREFIX`：输出前缀
 - `-o, --output MODE`：`separate | multiframe`
 - `--no-align`：禁用端点对齐
+- `--strict-path-method`：若请求的 path method 发生回退，仍写出结果，但命令返回退出码 2
 - `-r, --rmsd-exec PATH`：手动指定 `calc_rmsd_xyz`
 
 LIIC 参数（`-m liic` / `-m neb-liic`）：
@@ -203,6 +206,7 @@ DM 参数：
 - `--dm-tol T`
 - `--dm-max-step S`
 - `--no-dm-fallback`：禁用 LIIC → DM 回退（LIIC 失败直接回退到 LIC）
+- 直接 `-m dm` 若失败，会回退到 `LIC`；最终实际使用的方法以 run summary 为准
 
 ## 外部引擎模式（External engine）
 
@@ -260,13 +264,14 @@ cmake .. -DUSE_MKL=OFF -DBLA_VENDOR=Generic
 ./bin/neb_interpolator -r /path/to/calc_rmsd_xyz initial.xyz final.xyz
 ```
 
-### 3) LIIC 插值失败
+### 3) LIIC / DM 插值失败
 
 - 调大 `--bond-factor`（如 1.30）以包含更多键
 - 调小 `--ev-thresh`（如 5e-4）以保留更多 DLC 模式
 - 增加 `--liic-maxiter` 迭代次数
-- 若 LIIC 失败，默认会回退到 DM，再回退到 LIC
+- 查看 run summary 中的 `Requested path method` / `Actual path method` / `Attempted path methods`
+- 若需要把“发生回退”视为失败，请加 `--strict-path-method`
 
 ---
 
-*最后更新：2026-02-24*
+*最后更新：2026-03-31*

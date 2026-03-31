@@ -444,8 +444,32 @@ add_custom_target(test_neb_core
     COMMENT "Testing NEB core (assembleNEBForces)"
 )
 
+# C++ unit test for run-report semantics and fallback disclosure
+add_executable(driver_report_test
+    ${CMAKE_SOURCE_DIR}/tests/test_driver_report.cpp
+)
+target_link_libraries(driver_report_test neb_lib)
+set_target_properties(driver_report_test PROPERTIES
+    COMPILE_FLAGS "-I${CMAKE_BINARY_DIR}/include -I${SRC_DIR}"
+)
+set_target_properties(driver_report_test
+    PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+)
+
+add_custom_target(test_driver_report
+    COMMAND ${CMAKE_BINARY_DIR}/bin/driver_report_test
+        ${CMAKE_BINARY_DIR}/examples/bondshift_init.xyz
+        ${CMAKE_BINARY_DIR}/examples/bondshift_final.xyz
+        ${CMAKE_BINARY_DIR}/examples/water.xyz
+        ${CMAKE_BINARY_DIR}/examples/water_rotated.xyz
+    DEPENDS driver_report_test
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+    COMMENT "Testing driver run-report semantics"
+)
+
 # Run all tests
-set(TEST_ALL_DEPENDS test_xyzgeom test_lic test_liic test_dm test_dm_fallback test_external_engine test_neb_core)
+set(TEST_ALL_DEPENDS test_xyzgeom test_lic test_liic test_dm test_dm_fallback test_external_engine test_neb_core test_driver_report)
 if(TARGET calc_rmsd_xyz)
     list(APPEND TEST_ALL_DEPENDS test_rmsd test_rmsd_range)
 endif()
@@ -539,7 +563,8 @@ add_custom_target(usage
     COMMAND echo "  test_lic       - Test LIC interpolation"
     COMMAND echo "  test_liic      - Test LIIC interpolation"
     COMMAND echo "  test_dm        - Test DM interpolation"
-    COMMAND echo "  test_dm_fallback - Test LIIC -> DM fallback"
+    COMMAND echo "  test_dm_fallback - Test LIIC -> DM fallback CLI semantics"
+    COMMAND echo "  test_driver_report - Test requested/actual method reporting"
     COMMAND echo "  test_external_engine - Test external engine interface"
     COMMAND echo "  install        - Install executables and files"
     COMMAND echo "  clean          - Clean build files"
